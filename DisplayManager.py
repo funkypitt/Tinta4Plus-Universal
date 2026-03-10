@@ -62,9 +62,11 @@ class DisplayManager:
     def _detect_desktop_environment(self):
         """Detect the running desktop environment.
 
-        Returns 'gnome', 'xfce', 'kde', or 'unknown'.
+        Returns 'gnome', 'cinnamon', 'xfce', 'kde', or 'unknown'.
         """
         desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
+        if 'cinnamon' in desktop:
+            return 'cinnamon'
         if 'gnome' in desktop or 'ubuntu' in desktop:
             return 'gnome'
         if 'kde' in desktop:
@@ -83,13 +85,13 @@ class DisplayManager:
 
     def _use_mutter_wayland(self):
         """Check if we should use Mutter (GNOME) Wayland backend."""
-        return self.session_type == 'wayland' and self.desktop_env != 'kde'
+        return self.session_type == 'wayland' and self.desktop_env in ('gnome', 'unknown')
 
     def get_displays(self):
         """Get list of connected displays."""
         if self._use_kde_wayland():
             return self._get_displays_kde()
-        if self.session_type == 'wayland':
+        if self._use_mutter_wayland():
             return self._get_displays_wayland()
         return self._get_displays_x11()
 
@@ -97,7 +99,7 @@ class DisplayManager:
         """Check if a display is currently active (enabled and has geometry)."""
         if self._use_kde_wayland():
             return self._is_display_active_kde(display_name)
-        if self.session_type == 'wayland':
+        if self._use_mutter_wayland():
             return self._is_display_active_wayland(display_name)
         return self._is_display_active_x11(display_name)
 
@@ -110,7 +112,7 @@ class DisplayManager:
         """
         if self._use_kde_wayland():
             return self._enable_display_kde(display_name, scale)
-        if self.session_type == 'wayland':
+        if self._use_mutter_wayland():
             return self._enable_display_wayland(display_name, scale)
         return self._enable_display_x11(display_name, scale)
 
@@ -118,7 +120,7 @@ class DisplayManager:
         """Disable/turn off a display."""
         if self._use_kde_wayland():
             return self._disable_display_kde(display_name)
-        if self.session_type == 'wayland':
+        if self._use_mutter_wayland():
             return self._disable_display_wayland(display_name)
         return self._disable_display_x11(display_name)
 
@@ -176,7 +178,7 @@ class DisplayManager:
         """Get the geometry (position and size) of a display."""
         if self._use_kde_wayland():
             return self._get_display_geometry_kde(display_name)
-        if self.session_type == 'wayland':
+        if self._use_mutter_wayland():
             return self._get_display_geometry_wayland(display_name)
         return self._get_display_geometry_x11(display_name)
 
@@ -1282,12 +1284,12 @@ except Exception as e:
         Returns:
             bool: True if at least one device was mapped, False otherwise
         """
-        if self.session_type == 'x11':
-            return self._map_touch_x11(display_name)
-        elif self.session_type == 'wayland':
-            if self._use_kde_wayland():
-                return self._map_touch_wayland_kde(display_name)
+        if self._use_kde_wayland():
+            return self._map_touch_wayland_kde(display_name)
+        elif self._use_mutter_wayland():
             return self._map_touch_wayland_gnome(display_name)
+        elif self.session_type == 'x11':
+            return self._map_touch_x11(display_name)
         else:
             self.logger.warning("Unknown session type, trying X11 touch mapping")
             return self._map_touch_x11(display_name)

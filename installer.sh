@@ -169,6 +169,8 @@ detect_de() {
     if [ -z "$xdg" ]; then
         if pgrep -x gnome-shell &>/dev/null; then
             xdg="GNOME"
+        elif pgrep -x cinnamon &>/dev/null; then
+            xdg="Cinnamon"
         elif pgrep -x xfce4-session &>/dev/null; then
             xdg="XFCE"
         elif pgrep -x plasmashell &>/dev/null; then
@@ -178,9 +180,10 @@ detect_de() {
 
     # 4. Map to our labels
     case "${xdg}${session}" in
-        *GNOME*|*gnome*|*Unity*|*Budgie*|*ubuntu*) DE="gnome" ;;
-        *XFCE*|*xfce*)                              DE="xfce" ;;
-        *KDE*|*plasma*)                              DE="kde" ;;
+        *Cinnamon*|*cinnamon*)                       DE="cinnamon" ;;
+        *GNOME*|*gnome*|*Unity*|*Budgie*|*ubuntu*)   DE="gnome" ;;
+        *XFCE*|*xfce*)                               DE="xfce" ;;
+        *KDE*|*plasma*)                               DE="kde" ;;
     esac
 
     info "Detected desktop environment: ${DE}"
@@ -202,7 +205,7 @@ install_deps() {
     fi
 
     case "$DE" in
-        gnome)
+        gnome|cinnamon)
             pkgs="$pkgs gnome-themes-extra"
             ;;
         kde)

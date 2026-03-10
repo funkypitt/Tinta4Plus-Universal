@@ -34,9 +34,11 @@ class ThemeManager:
     def _detect_desktop_environment(self):
         """Detect the running desktop environment.
 
-        Returns 'gnome', 'xfce', 'kde', or 'unknown'.
+        Returns 'gnome', 'cinnamon', 'xfce', 'kde', or 'unknown'.
         """
         desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
+        if 'cinnamon' in desktop:
+            return 'cinnamon'
         if 'gnome' in desktop or 'ubuntu' in desktop:
             return 'gnome'
         if 'kde' in desktop:
@@ -59,7 +61,7 @@ class ThemeManager:
         Returns:
             bool: True if successful, False otherwise
         """
-        if self.desktop_env == 'gnome':
+        if self.desktop_env in ('gnome', 'cinnamon'):
             return self._set_gnome_theme(theme_name)
         elif self.desktop_env == 'kde':
             return self._set_kde_theme(theme_name)
@@ -77,7 +79,7 @@ class ThemeManager:
         Returns:
             str: Current theme name, or None if detection failed
         """
-        if self.desktop_env == 'gnome':
+        if self.desktop_env in ('gnome', 'cinnamon'):
             return self._get_gnome_theme()
         elif self.desktop_env == 'kde':
             return self._get_kde_theme()
