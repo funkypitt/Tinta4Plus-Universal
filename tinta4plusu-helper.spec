@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for Tinta4Plus Helper Daemon
-Produces: dist/tinta4plus-helper/tinta4plus-helper
+PyInstaller spec for Tinta4PlusU Helper Daemon
+Produces: dist/tinta4plusu-helper/tinta4plusu-helper
 """
 
 a = Analysis(
@@ -28,7 +28,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='tinta4plus-helper',
+    name='tinta4plusu-helper',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -43,5 +43,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='tinta4plus-helper',
+    name='tinta4plusu-helper',
 )

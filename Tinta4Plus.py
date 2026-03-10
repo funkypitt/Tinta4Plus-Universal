@@ -171,11 +171,11 @@ class EInkControlGUI:
     VERSION = "0.1.0 alpha"
 
     # Configuration
-    SOCKET_PATH = '/tmp/tinta4plus.sock'
+    SOCKET_PATH = '/tmp/tinta4plusu.sock'
     KEEPALIVE_INTERVAL = 2.4  # seconds (send keepalive every 2.4s, watchdog is 20s)
     SOCKET_TIMEOUT = 10.0  # seconds
-    CONFIG_DIR = os.path.expanduser("~/.config/Tinta4Plus")
-    SETTINGS_FILE = os.path.join(os.path.expanduser("~/.config/Tinta4Plus"), "settings")
+    CONFIG_DIR = os.path.expanduser("~/.config/Tinta4PlusU")
+    SETTINGS_FILE = os.path.join(os.path.expanduser("~/.config/Tinta4PlusU"), "settings")
 
     # Display names (ThinkBook Plus Gen 4 has eDP-1=OLED, eDP-2=E-Ink)
     DISPLAY_OLED = "eDP-1"
@@ -195,7 +195,7 @@ class EInkControlGUI:
 
     """Main GUI application using tkinter"""
 
-    def __init__(self, root, HELPER_SCRIPT, logger):
+    def __init__(self, root, HELPER_SCRIPT, logger, autostart=False):
         self.HELPER_SCRIPT = HELPER_SCRIPT
         self.logger = logger
         self.root = root
@@ -241,12 +241,18 @@ class EInkControlGUI:
         self.refresh_period_var.set(settings['refresh_period'])
         self.refresh_period_label.config(text=str(settings['refresh_period']))
         self.autoswitch_theme_var.set(settings['autoswitch_theme'])
-        
+
         # Set up window close handler
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        # Initialize helper after short delay
-        self.root.after(500, self.initialize_helper)
+        if autostart:
+            # Autostart mode: don't launch helper immediately (avoids password prompt at login)
+            self.update_status("Click 'Connect to Helper' to start")
+            self.log_message("Autostart mode — helper not launched automatically")
+            self._check_secure_boot_local()
+        else:
+            # Normal launch: connect to helper after short delay
+            self.root.after(500, self.initialize_helper)
 
     def load_settings(self):
         """Load settings from configuration file"""
@@ -323,14 +329,21 @@ class EInkControlGUI:
         status_label.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
         row += 1
 
-        # Secure Boot status indicator
-        self.secureboot_frame = tk.Frame(main_frame, bg='gray', relief=tk.RIDGE, bd=2)
-        self.secureboot_frame.grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
+        # Status row: Secure Boot indicator + Connect button
+        status_row_frame = ttk.Frame(main_frame)
+        status_row_frame.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.secureboot_frame = tk.Frame(status_row_frame, bg='gray', relief=tk.RIDGE, bd=2)
+        self.secureboot_frame.pack(side=tk.LEFT)
 
         self.secureboot_label = tk.Label(self.secureboot_frame, text="Secure Boot: Unknown",
                                          bg='gray', fg='white', font=('TkDefaultFont', 9, 'bold'),
                                          padx=10, pady=3)
         self.secureboot_label.pack()
+
+        self.connect_btn = ttk.Button(status_row_frame, text="Connect to Helper",
+                                       command=self.initialize_helper)
+        self.connect_btn.pack(side=tk.RIGHT, padx=(10, 0))
         row += 1
         
         # === Display Control Section ===
@@ -441,14 +454,14 @@ class EInkControlGUI:
         brightness_container.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
         brightness_container.columnconfigure(0, weight=1)
 
-        self.brightness_var = tk.IntVar(value=4)
+        self.brightness_var = tk.IntVar(value=5)
         self.brightness_scale = ttk.Scale(brightness_container, from_=0, to=8,
                                          orient=tk.HORIZONTAL,
                                          variable=self.brightness_var,
                                          command=self.on_brightness_changed)
         self.brightness_scale.grid(row=0, column=0, sticky=(tk.W, tk.E))
 
-        self.brightness_label = ttk.Label(brightness_container, text="4")
+        self.brightness_label = ttk.Label(brightness_container, text="5")
         self.brightness_label.grid(row=0, column=1, padx=(5, 0))
 
         # Warning label for Secure Boot (initially hidden)
@@ -548,6 +561,8 @@ class EInkControlGUI:
     
     def initialize_helper(self):
         """Initialize connection to helper daemon"""
+        self.connect_btn.config(state='disabled')
+
         # First try to connect to existing helper
         if os.path.exists(self.SOCKET_PATH):
             try:
@@ -555,6 +570,7 @@ class EInkControlGUI:
                     self.update_status("Connected to helper daemon")
                     self.log_message("Connected to existing helper daemon")
                     self.start_keepalive()
+                    self.root.after(500, self.check_ec_status)
                     return
             except Exception as e:
                 self.log_message(f"Failed to connect to existing socket: {e}")
@@ -563,11 +579,11 @@ class EInkControlGUI:
                     os.remove(self.SOCKET_PATH)
                 except:
                     pass
-        
+
         # No existing helper, launch it
         self.log_message("Helper daemon not found, launching...")
         self.update_status("Launching helper daemon (password required)...")
-        
+
         # Launch helper via pkexec in background
         threading.Thread(target=self._launch_helper_thread, daemon=True).start()
     
@@ -593,20 +609,26 @@ class EInkControlGUI:
                 stderr=subprocess.PIPE
             )
             
-            # Wait a moment for helper to start
-            time.sleep(1.5)
-            
-            # Try to connect
-            max_attempts = 10
+            # Wait for helper to start (longer at login when polkit agent may not be ready)
+            time.sleep(2.0)
+
+            # Try to connect — up to 20 attempts (≈12s total after initial wait)
+            max_attempts = 20
             for attempt in range(max_attempts):
+                # Check if pkexec process died (user cancelled password, etc.)
+                if self.helper_process.poll() is not None:
+                    rc = self.helper_process.returncode
+                    self.root.after(0, self._helper_launch_failed,
+                                  f"Helper process exited (code {rc}) — password cancelled or pkexec failed")
+                    return
                 if os.path.exists(self.SOCKET_PATH):
                     if self.helper.connect(self.SOCKET_PATH, timeout=self.SOCKET_TIMEOUT):
                         self.root.after(0, self._helper_launch_success)
                         return
                 time.sleep(0.5)
-            
-            self.root.after(0, self._helper_launch_failed, 
-                          "Helper started but socket not available")
+
+            self.root.after(0, self._helper_launch_failed,
+                          "Helper started but socket not available after 12s")
             
         except Exception as e:
             self.root.after(0, self._helper_launch_failed, str(e))
@@ -615,6 +637,7 @@ class EInkControlGUI:
         """Called when helper successfully launched"""
         self.update_status("Connected to helper daemon")
         self.log_message("Helper daemon launched successfully")
+        self.connect_btn.config(state='disabled')
         self.start_keepalive()
 
         # Check EC status
@@ -624,11 +647,29 @@ class EInkControlGUI:
         """Called when helper launch failed"""
         self.update_status(f"Failed to launch helper: {error}", error=True)
         self.log_message(f"ERROR: Failed to launch helper - {error}", level='error')
+        self.connect_btn.config(state='normal')
         self.show_error_dialog(
             f"Failed to launch helper daemon:\n\n{error}\n\n"
             "Make sure you entered the correct password."
         )
-    
+        # Update Secure Boot indicator locally (since we can't ask the helper)
+        self._check_secure_boot_local()
+
+    def _check_secure_boot_local(self):
+        """Check Secure Boot status locally via mokutil (no helper needed)"""
+        try:
+            result = subprocess.run(['mokutil', '--sb-state'],
+                                    capture_output=True, text=True, timeout=2)
+            output = result.stdout.strip()
+            if 'SecureBoot enabled' in output:
+                self.secureboot_label.config(text="Secure Boot: ON", bg='red')
+                self.secureboot_frame.config(bg='red')
+            else:
+                self.secureboot_label.config(text="Secure Boot: OFF", bg='green')
+                self.secureboot_frame.config(bg='green')
+        except Exception as e:
+            self.logger.warning(f"Could not check Secure Boot locally: {e}")
+
     def start_keepalive(self):
         """Start periodic keepalive messages"""
         if self.keepalive_after_id:
@@ -844,10 +885,18 @@ class EInkControlGUI:
                 else:
                     self.log_message("⚠ Failed to enable frontlight (may not be available)", level='error')
 
+                # Step 4: Set reading mode as default for eInk
+                self.log_message("Setting E-Ink to reading mode...")
+                reading_response = self.execute_helper_command('set-reading')
+                if reading_response:
+                    self.log_message("✓ E-Ink set to reading mode")
+                else:
+                    self.log_message("⚠ Failed to set reading mode", level='error')
+
                 # Small delay before disabling OLED
                 time.sleep(0.5)
 
-                # Step 4: Disable OLED display on eDP-1 as the last step
+                # Step 5: Disable OLED display on eDP-1 as the last step
                 self.log_message(f"Disabling OLED display on {self.DISPLAY_OLED}...")
                 if self.display_mgr.disable_display(self.DISPLAY_OLED):
                     self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) disabled")
@@ -947,10 +996,10 @@ class EInkControlGUI:
                             pass
                     self.eink_image_process = None
 
-                # Step 1: Enable OLED display on eDP-1 first
-                self.log_message(f"Enabling OLED display on {self.DISPLAY_OLED} with {self.display_scale}x scale...")
-                if self.display_mgr.enable_display(self.DISPLAY_OLED, scale=self.display_scale):
-                    self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) enabled with {self.display_scale}x scale")
+                # Step 1: Enable OLED display on eDP-1 at native 2880x1800 with scale 1
+                self.log_message(f"Enabling OLED display on {self.DISPLAY_OLED} at native resolution (scale 1)...")
+                if self.display_mgr.enable_display(self.DISPLAY_OLED, scale=1.0):
+                    self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) enabled at native resolution (scale 1)")
                 else:
                     self.log_message(f"⚠ Failed to enable OLED display on {self.DISPLAY_OLED}", level='error')
 
@@ -1168,7 +1217,10 @@ class EInkControlGUI:
 def show_disclaimer_dialog(parent=None):
     """Show disclaimer dialog on first launch. Returns True if user agrees, False otherwise."""
     # Load EULA text from external file
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, 'frozen', False):
+        script_dir = sys._MEIPASS  # PyInstaller data dir
+    else:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
     eula_file = os.path.join(script_dir, "README_EULA_INSTRUCTIONS_WARNINGS.txt")
 
     try:
@@ -1201,7 +1253,7 @@ def show_disclaimer_dialog(parent=None):
         sys.exit(1)
 
     # Check if agreement file exists
-    config_dir = os.path.expanduser("~/.config/Tinta4Plus")
+    config_dir = os.path.expanduser("~/.config/Tinta4PlusU")
     agree_file = os.path.join(config_dir, "agree")
 
     if os.path.exists(agree_file):
@@ -1346,8 +1398,8 @@ def _resolve_helper_path(logger):
         base_dir = os.path.dirname(os.path.abspath(__file__))
 
     candidates = [
-        '/usr/local/bin/tinta4plus-helper',                          # Installed binary (symlink)
-        os.path.join(base_dir, 'tinta4plus-helper'),                 # Portable binary (same dir)
+        '/usr/local/bin/tinta4plusu-helper',                          # Installed binary (symlink)
+        os.path.join(base_dir, 'tinta4plusu-helper'),                 # Portable binary (same dir)
         '/usr/local/bin/HelperDaemon.py',                            # Legacy installed script
         os.path.join(base_dir, 'HelperDaemon.py'),                   # Dev script (same dir)
     ]
@@ -1364,10 +1416,12 @@ def _resolve_helper_path(logger):
 
 def main():
     """Entry point"""
+    autostart = '--autostart' in sys.argv
+
     # Setup logging
     log_handlers = [
         logging.StreamHandler(),  # Console output
-        logging.FileHandler('/tmp/tinta4plus.log', mode='w')  # File output (overwrite mode)
+        logging.FileHandler('/tmp/tinta4plusu.log', mode='w')  # File output (overwrite mode)
     ]
 
     logging.basicConfig(
@@ -1375,7 +1429,7 @@ def main():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=log_handlers
     )
-    logger = logging.getLogger('tinta4plus-gui')
+    logger = logging.getLogger('tinta4plusu-gui')
 
     # Setup exception hook to log uncaught exceptions
     def handle_exception(exc_type, exc_value, exc_traceback):
@@ -1390,7 +1444,7 @@ def main():
     sys.excepthook = handle_exception
 
     HELPER_SCRIPT = _resolve_helper_path(logger)
-    
+
     root = tk.Tk()
     root.withdraw()  # Hide the main window initially
 
@@ -1402,7 +1456,7 @@ def main():
 
     # User agreed, show the main window
     root.deiconify()
-    app = EInkControlGUI(root, HELPER_SCRIPT, logger)
+    app = EInkControlGUI(root, HELPER_SCRIPT, logger, autostart=autostart)
 
     try:
         root.mainloop()

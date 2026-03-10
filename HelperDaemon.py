@@ -32,8 +32,8 @@ from ECController import ECController
 from EInkUSBController import EInkUSBController 
 
 # Configuration
-SOCKET_PATH = '/tmp/tinta4plus.sock'
-PID_FILE = '/tmp/tinta4plus.pid'
+SOCKET_PATH = '/tmp/tinta4plusu.sock'
+PID_FILE = '/tmp/tinta4plusu.pid'
 WATCHDOG_TIMEOUT = 20.0  # seconds
 LOG_LEVEL = logging.DEBUG  # Changed to DEBUG for detailed EC port access logging
 
@@ -397,7 +397,7 @@ def main():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=log_handlers
     )
-    logger = logging.getLogger('tinta4plus-helper')
+    logger = logging.getLogger('tinta4plusu-helper')
 
     # Setup exception hook to log uncaught exceptions
     def handle_exception(exc_type, exc_value, exc_traceback):

@@ -1,7 +1,7 @@
 [Desktop Entry]
-Name=Tinta4Plus
+Name=Tinta4PlusU
 Comment=eInk display control for Lenovo ThinkBook Plus Gen 4
-Exec=/usr/local/bin/tinta4plus
+Exec=/usr/local/bin/tinta4plusu
 Icon=preferences-desktop-display
 Terminal=false
 Type=Application

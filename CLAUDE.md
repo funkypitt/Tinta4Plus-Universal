@@ -1,12 +1,14 @@
-# Tinta4Plus — Claude Code Context
+# Tinta4PlusU — Claude Code Context
 
 ## What is this project?
 
-Tinta4Plus is a Linux GUI + privileged daemon for controlling the eInk display on the Lenovo ThinkBook Plus Gen 4 IRU. It runs on Ubuntu (GNOME and XFCE tested). The eInk is a **color** display (2560x1600).
+Tinta4PlusU (Universal) is a Linux GUI + privileged daemon for controlling the eInk display on the Lenovo ThinkBook Plus Gen 4 IRU. It runs on Ubuntu (GNOME and XFCE tested). The eInk is a **color** display (2560x1600).
+
+This is a fork/universal version. The binary/install names use `tinta4plusu` to coexist with the original `tinta4plus`.
 
 ## Architecture
 
-Two-process model communicating via Unix socket (`/tmp/tinta4plus.sock`):
+Two-process model communicating via Unix socket (`/tmp/tinta4plusu.sock`):
 
 - **Tinta4Plus.py** — Unprivileged tkinter GUI. Launches the helper via `pkexec`.
 - **HelperDaemon.py** — Privileged daemon (needs root for EC port I/O and USB). Runs as a socket server.
@@ -36,10 +38,10 @@ Two-process model communicating via Unix socket (`/tmp/tinta4plus.sock`):
 
 Two spec files produce two independent onedir bundles:
 
-- `tinta4plus.spec` → `dist/tinta4plus/tinta4plus` (GUI, console=False)
+- `tinta4plusu.spec` → `dist/tinta4plusu/tinta4plusu` (GUI, console=False)
   - Bundles: `eink-disable1.jpg`, `eink-disable2.jpg`, `eink-disable3.jpg` as data
   - Hidden imports: `ThemeManager`, `DisplayManager`, `HelperClient`
-- `tinta4plus-helper.spec` → `dist/tinta4plus-helper/tinta4plus-helper` (daemon, console=True)
+- `tinta4plusu-helper.spec` → `dist/tinta4plusu-helper/tinta4plusu-helper` (daemon, console=True)
   - Hidden imports: `ECController`, `EInkUSBController`, `WatchdogTimer`
 
 Build: `bash build.sh`
@@ -53,11 +55,11 @@ Run as root: `sudo bash installer.sh`
 What it does:
 1. Detects desktop environment (3 fallback methods: env vars → loginctl for SUDO_USER session → process detection)
 2. Installs apt dependencies (`python3-tk`, `libusb-1.0-0`, DE-specific packages)
-3. Copies onedir bundles to `/opt/tinta4plus/`
-4. Creates symlinks in `/usr/local/bin/` → `/opt/tinta4plus/*/`
-5. Installs `tinta4plus.desktop` to `/usr/share/applications/`
-6. Installs `tinta4plus-autostart.desktop` to `/etc/xdg/autostart/`
-7. Optionally installs PolicyKit policy (`org.tinta4plus.helper.policy`) for `auth_admin_keep` (user chooses at install time)
+3. Copies onedir bundles to `/opt/tinta4plusu/`
+4. Creates symlinks in `/usr/local/bin/` → `/opt/tinta4plusu/*/`
+5. Installs `tinta4plusu.desktop` to `/usr/share/applications/`
+6. Installs `tinta4plusu-autostart.desktop` to `/etc/xdg/autostart/`
+7. Optionally installs PolicyKit policy (`org.tinta4plusu.helper.policy`) for `auth_admin_keep` (user chooses at install time)
 
 Uninstall: `sudo bash installer.sh --uninstall`
 
@@ -66,8 +68,8 @@ Uninstall: `sudo bash installer.sh --uninstall`
 ### Helper path resolution (`_resolve_helper_path()`)
 
 Priority order:
-1. `/usr/local/bin/tinta4plus-helper` — installed binary (symlink to /opt)
-2. `./tinta4plus-helper` — portable binary (same dir as GUI)
+1. `/usr/local/bin/tinta4plusu-helper` — installed binary (symlink to /opt)
+2. `./tinta4plusu-helper` — portable binary (same dir as GUI)
 3. `/usr/local/bin/HelperDaemon.py` — legacy installed script
 4. `./HelperDaemon.py` — dev script (same dir)
 
@@ -96,10 +98,10 @@ Image resolution in frozen mode uses `sys._MEIPASS` (PyInstaller `_internal/` di
 - `Tinta4Plus.py`, `HelperDaemon.py`, `DisplayManager.py`, `ThemeManager.py`, `HelperClient.py`, `ECController.py`, `EInkUSBController.py`, `WatchdogTimer.py`
 - `eink-disable1.jpg`, `eink-disable2.jpg`, `eink-disable3.jpg` (privacy images)
 - `eink-disable.jpg` (original, unused by code)
-- `tinta4plus.spec`, `tinta4plus-helper.spec`
+- `tinta4plusu.spec`, `tinta4plusu-helper.spec`
 - `build.sh`, `installer.sh`
-- `tinta4plus.desktop`, `tinta4plus-autostart.desktop`
-- `org.tinta4plus.helper.policy`
+- `tinta4plusu.desktop`, `tinta4plusu-autostart.desktop`
+- `org.tinta4plusu.helper.policy`
 
 ### Generated (in .gitignore)
 - `build/` — PyInstaller work directory
@@ -108,6 +110,7 @@ Image resolution in frozen mode uses `sys._MEIPASS` (PyInstaller `_internal/` di
 ## Conventions
 - The project does not use a virtualenv — system Python 3.12.3 with system packages
 - Dependencies: `python3-tk`, `pyusb`, `portio`, `libusb-1.0-0`
-- Logging goes to `/tmp/tinta4plus.log` (overwrite mode) + console
-- Socket path: `/tmp/tinta4plus.sock`
+- Logging goes to `/tmp/tinta4plusu.log` (overwrite mode) + console
+- Socket path: `/tmp/tinta4plusu.sock`
+- Config dir: `~/.config/Tinta4PlusU`
 - Commit messages: imperative mood, concise summary line, details in body if needed

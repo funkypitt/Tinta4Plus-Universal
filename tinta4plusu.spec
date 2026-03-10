@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for Tinta4Plus GUI
-Produces: dist/tinta4plus/tinta4plus
+PyInstaller spec for Tinta4PlusU GUI
+Produces: dist/tinta4plusu/tinta4plusu
 """
 
 a = Analysis(
@@ -12,6 +12,7 @@ a = Analysis(
         ('eink-disable1.jpg', '.'),
         ('eink-disable2.jpg', '.'),
         ('eink-disable3.jpg', '.'),
+        ('README_EULA_INSTRUCTIONS_WARNINGS.txt', '.'),
     ],
     hiddenimports=[
         'ThemeManager',
@@ -32,7 +33,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='tinta4plus',
+    name='tinta4plusu',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -47,5 +48,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='tinta4plus',
+    name='tinta4plusu',
 )

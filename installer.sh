@@ -1,18 +1,18 @@
 #!/bin/bash
 set -eE
 
-# Tinta4Plus Installer
+# Tinta4PlusU Installer
 # Installs either PyInstaller binaries or Python scripts into the system
 
-APP_NAME="tinta4plus"
-INSTALL_DIR="/opt/tinta4plus"
+APP_NAME="tinta4plusu"
+INSTALL_DIR="/opt/tinta4plusu"
 BIN_DIR="/usr/local/bin"
 DESKTOP_DIR="/usr/share/applications"
 AUTOSTART_DIR="/etc/xdg/autostart"
 POLKIT_DIR="/usr/share/polkit-1/actions"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_MODE=""  # "binary" or "script"
-LOG_FILE="/tmp/tinta4plus-install.log"
+LOG_FILE="/tmp/tinta4plusu-install.log"
 CURRENT_STEP=""
 
 # Colors
@@ -53,16 +53,16 @@ step() {
 # ─── Uninstall ───────────────────────────────────────────────────────────────
 
 do_uninstall() {
-    info "Uninstalling Tinta4Plus..."
+    info "Uninstalling Tinta4PlusU..."
 
-    rm -f  "${BIN_DIR}/tinta4plus"
-    rm -f  "${BIN_DIR}/tinta4plus-helper"
+    rm -f  "${BIN_DIR}/tinta4plusu"
+    rm -f  "${BIN_DIR}/tinta4plusu-helper"
     rm -rf "${INSTALL_DIR}"
-    rm -f  "${DESKTOP_DIR}/tinta4plus.desktop"
-    rm -f  "${AUTOSTART_DIR}/tinta4plus-autostart.desktop"
-    rm -f  "${POLKIT_DIR}/org.tinta4plus.helper.policy"
+    rm -f  "${DESKTOP_DIR}/tinta4plusu.desktop"
+    rm -f  "${AUTOSTART_DIR}/tinta4plusu-autostart.desktop"
+    rm -f  "${POLKIT_DIR}/org.tinta4plusu.helper.policy"
 
-    info "Tinta4Plus has been uninstalled."
+    info "Tinta4PlusU has been uninstalled."
     exit 0
 }
 
@@ -70,8 +70,8 @@ do_uninstall() {
 
 choose_mode() {
     local has_binary=false
-    if [ -f "${SCRIPT_DIR}/dist/tinta4plus/tinta4plus" ] && \
-       [ -f "${SCRIPT_DIR}/dist/tinta4plus-helper/tinta4plus-helper" ]; then
+    if [ -f "${SCRIPT_DIR}/dist/tinta4plusu/tinta4plusu" ] && \
+       [ -f "${SCRIPT_DIR}/dist/tinta4plusu-helper/tinta4plusu-helper" ]; then
         has_binary=true
     fi
 
@@ -302,23 +302,23 @@ install_binary() {
     mkdir -p "${INSTALL_DIR}"
 
     info "Copying GUI bundle..."
-    cp -r "${SCRIPT_DIR}/dist/tinta4plus"        "${INSTALL_DIR}/"
+    cp -r "${SCRIPT_DIR}/dist/tinta4plusu"        "${INSTALL_DIR}/"
     info "Copying helper bundle..."
-    cp -r "${SCRIPT_DIR}/dist/tinta4plus-helper"  "${INSTALL_DIR}/"
+    cp -r "${SCRIPT_DIR}/dist/tinta4plusu-helper"  "${INSTALL_DIR}/"
 
-    chmod 755 "${INSTALL_DIR}/tinta4plus/tinta4plus"
-    chmod 755 "${INSTALL_DIR}/tinta4plus-helper/tinta4plus-helper"
+    chmod 755 "${INSTALL_DIR}/tinta4plusu/tinta4plusu"
+    chmod 755 "${INSTALL_DIR}/tinta4plusu-helper/tinta4plusu-helper"
 
-    ln -sf "${INSTALL_DIR}/tinta4plus/tinta4plus"              "${BIN_DIR}/tinta4plus"
-    ln -sf "${INSTALL_DIR}/tinta4plus-helper/tinta4plus-helper" "${BIN_DIR}/tinta4plus-helper"
+    ln -sf "${INSTALL_DIR}/tinta4plusu/tinta4plusu"              "${BIN_DIR}/tinta4plusu"
+    ln -sf "${INSTALL_DIR}/tinta4plusu-helper/tinta4plusu-helper" "${BIN_DIR}/tinta4plusu-helper"
 
     # Verify binaries are executable
-    if [ ! -x "${BIN_DIR}/tinta4plus" ]; then
-        error "GUI binary symlink is not executable: ${BIN_DIR}/tinta4plus"
+    if [ ! -x "${BIN_DIR}/tinta4plusu" ]; then
+        error "GUI binary symlink is not executable: ${BIN_DIR}/tinta4plusu"
         exit 1
     fi
-    if [ ! -x "${BIN_DIR}/tinta4plus-helper" ]; then
-        error "Helper binary symlink is not executable: ${BIN_DIR}/tinta4plus-helper"
+    if [ ! -x "${BIN_DIR}/tinta4plusu-helper" ]; then
+        error "Helper binary symlink is not executable: ${BIN_DIR}/tinta4plusu-helper"
         exit 1
     fi
 
@@ -358,10 +358,18 @@ install_script() {
         exit 1
     fi
 
+    # Copy EULA file
+    if [ -f "${SCRIPT_DIR}/README_EULA_INSTRUCTIONS_WARNINGS.txt" ]; then
+        cp "${SCRIPT_DIR}/README_EULA_INSTRUCTIONS_WARNINGS.txt" "${INSTALL_DIR}/"
+        info "EULA file copied."
+    else
+        warn "EULA file not found — first-launch disclaimer will not work."
+    fi
+
     # Copy privacy images
     local img_count=0
     for img in "${SCRIPT_DIR}"/eink-disable*.jpg; do
-        [ -f "$img" ] && cp "$img" "${INSTALL_DIR}/" && ((img_count++))
+        [ -f "$img" ] && cp "$img" "${INSTALL_DIR}/" && img_count=$((img_count + 1))
     done
     if [ "$img_count" -eq 0 ]; then
         warn "No privacy images (eink-disable*.jpg) found — privacy screen will not work."
@@ -373,17 +381,17 @@ install_script() {
     chmod 755 "${INSTALL_DIR}/HelperDaemon.py"
 
     # Create launcher wrappers in /usr/local/bin
-    cat > "${BIN_DIR}/tinta4plus" << 'WRAPPER'
+    cat > "${BIN_DIR}/tinta4plusu" << 'WRAPPER'
 #!/bin/bash
-exec python3 /opt/tinta4plus/Tinta4Plus.py "$@"
+exec python3 /opt/tinta4plusu/Tinta4Plus.py "$@"
 WRAPPER
-    chmod 755 "${BIN_DIR}/tinta4plus"
+    chmod 755 "${BIN_DIR}/tinta4plusu"
 
-    cat > "${BIN_DIR}/tinta4plus-helper" << 'WRAPPER'
+    cat > "${BIN_DIR}/tinta4plusu-helper" << 'WRAPPER'
 #!/bin/bash
-exec python3 /opt/tinta4plus/HelperDaemon.py "$@"
+exec python3 /opt/tinta4plusu/HelperDaemon.py "$@"
 WRAPPER
-    chmod 755 "${BIN_DIR}/tinta4plus-helper"
+    chmod 755 "${BIN_DIR}/tinta4plusu-helper"
 
     info "Python scripts installed."
 }
@@ -393,12 +401,12 @@ WRAPPER
 install_desktop() {
     step "Installing desktop entries"
 
-    cp "${SCRIPT_DIR}/tinta4plus.desktop"           "${DESKTOP_DIR}/"
-    cp "${SCRIPT_DIR}/tinta4plus-autostart.desktop"  "${AUTOSTART_DIR}/"
+    cp "${SCRIPT_DIR}/tinta4plusu.desktop"           "${DESKTOP_DIR}/"
+    cp "${SCRIPT_DIR}/tinta4plusu-autostart.desktop"  "${AUTOSTART_DIR}/"
 
     # Validate desktop files if desktop-file-validate is available
     if command -v desktop-file-validate &>/dev/null; then
-        desktop-file-validate "${DESKTOP_DIR}/tinta4plus.desktop" 2>/dev/null || true
+        desktop-file-validate "${DESKTOP_DIR}/tinta4plusu.desktop" 2>/dev/null || true
     fi
 
     # Update desktop database
@@ -422,7 +430,7 @@ install_polkit() {
 
     if [[ "$answer" =~ ^[Yy]$ ]]; then
         mkdir -p "${POLKIT_DIR}"
-        cp "${SCRIPT_DIR}/org.tinta4plus.helper.policy" "${POLKIT_DIR}/"
+        cp "${SCRIPT_DIR}/org.tinta4plusu.helper.policy" "${POLKIT_DIR}/"
         info "PolicyKit policy installed."
     else
         info "Skipping PolicyKit policy."
@@ -433,11 +441,11 @@ install_polkit() {
 
 main() {
     # Initialize log file
-    echo "=== Tinta4Plus Installer — $(date) ===" > "$LOG_FILE"
+    echo "=== Tinta4PlusU Installer — $(date) ===" > "$LOG_FILE"
 
     echo ""
     echo "╔══════════════════════════════════════╗"
-    echo "║      Tinta4Plus Installer            ║"
+    echo "║      Tinta4PlusU Installer           ║"
     echo "║  eInk Control for ThinkBook Plus G4  ║"
     echo "╚══════════════════════════════════════╝"
     echo ""
@@ -467,8 +475,8 @@ main() {
     info "════════════════════════════════════════"
     info " Installation complete! (mode: ${INSTALL_MODE})"
     info ""
-    info " Launch from terminal:  tinta4plus"
-    info " Or find 'Tinta4Plus' in your application menu."
+    info " Launch from terminal:  tinta4plusu"
+    info " Or find 'Tinta4PlusU' in your application menu."
     info " It will also autostart on next login."
     info ""
     info " To uninstall:  sudo bash installer.sh --uninstall"
