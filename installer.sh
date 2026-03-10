@@ -205,6 +205,9 @@ install_deps() {
         gnome)
             pkgs="$pkgs gnome-themes-extra"
             ;;
+        kde)
+            pkgs="$pkgs kscreen plasma-workspace"
+            ;;
         xfce)
             pkgs="$pkgs xfce4-settings"
             ;;

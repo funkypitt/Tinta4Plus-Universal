@@ -34,11 +34,13 @@ class ThemeManager:
     def _detect_desktop_environment(self):
         """Detect the running desktop environment.
 
-        Returns 'gnome', 'xfce', or 'unknown'.
+        Returns 'gnome', 'xfce', 'kde', or 'unknown'.
         """
         desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
         if 'gnome' in desktop or 'ubuntu' in desktop:
             return 'gnome'
+        if 'kde' in desktop:
+            return 'kde'
         if 'xfce' in desktop:
             return 'xfce'
         return 'unknown'
@@ -52,12 +54,15 @@ class ThemeManager:
 
         Args:
             theme_name: Theme name (e.g., 'HighContrast', 'Adwaita-dark')
+                        For KDE, mapped to Plasma color schemes.
 
         Returns:
             bool: True if successful, False otherwise
         """
         if self.desktop_env == 'gnome':
             return self._set_gnome_theme(theme_name)
+        elif self.desktop_env == 'kde':
+            return self._set_kde_theme(theme_name)
         elif self.desktop_env == 'xfce':
             return self._set_xfce_theme(theme_name)
         else:
@@ -74,6 +79,8 @@ class ThemeManager:
         """
         if self.desktop_env == 'gnome':
             return self._get_gnome_theme()
+        elif self.desktop_env == 'kde':
+            return self._get_kde_theme()
         elif self.desktop_env == 'xfce':
             return self._get_xfce_theme()
         else:
@@ -122,6 +129,52 @@ class ThemeManager:
             ], capture_output=True, text=True, check=True, timeout=5)
             # gsettings returns value with quotes, e.g. "'Adwaita-dark'"
             return result.stdout.strip().strip("'")
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # KDE backend (plasma-apply-colorscheme)
+    # ------------------------------------------------------------------
+
+    # Map GTK theme names used by the app to Plasma color schemes
+    _KDE_THEME_MAP = {
+        'HighContrast': 'BreezeHighContrast',
+        'Adwaita-dark': 'BreezeDark',
+        'Adwaita': 'BreezeLight',
+    }
+
+    _KDE_THEME_REVERSE = {v: k for k, v in _KDE_THEME_MAP.items()}
+
+    def _set_kde_theme(self, theme_name):
+        """Set color scheme via plasma-apply-colorscheme (KDE Plasma)."""
+        plasma_scheme = self._KDE_THEME_MAP.get(theme_name, theme_name)
+        try:
+            subprocess.run([
+                'plasma-apply-colorscheme', plasma_scheme
+            ], check=True, capture_output=True, timeout=5)
+            self.logger.info(f"KDE: switched to {plasma_scheme} color scheme")
+            return True
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Failed to set KDE color scheme: {e}")
+            return False
+        except FileNotFoundError:
+            self.logger.error("plasma-apply-colorscheme not found (not running KDE Plasma?)")
+            return False
+
+    def _get_kde_theme(self):
+        """Get current color scheme via plasma-apply-colorscheme."""
+        try:
+            result = subprocess.run([
+                'plasma-apply-colorscheme', '--list-schemes'
+            ], capture_output=True, text=True, timeout=5)
+            # Lines with " (current)" suffix indicate the active scheme
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line.endswith('(current color scheme)') or line.endswith('(current)'):
+                    scheme = line.rsplit('(', 1)[0].strip().lstrip('* ')
+                    # Map back to GTK name if possible
+                    return self._KDE_THEME_REVERSE.get(scheme, scheme)
+            return None
         except Exception:
             return None
 

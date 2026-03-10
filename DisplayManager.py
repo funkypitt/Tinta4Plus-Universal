@@ -62,11 +62,13 @@ class DisplayManager:
     def _detect_desktop_environment(self):
         """Detect the running desktop environment.
 
-        Returns 'gnome', 'xfce', or 'unknown'.
+        Returns 'gnome', 'xfce', 'kde', or 'unknown'.
         """
         desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
         if 'gnome' in desktop or 'ubuntu' in desktop:
             return 'gnome'
+        if 'kde' in desktop:
+            return 'kde'
         if 'xfce' in desktop:
             return 'xfce'
         return 'unknown'
@@ -75,14 +77,26 @@ class DisplayManager:
     # Public API — dispatchers
     # ------------------------------------------------------------------
 
+    def _use_kde_wayland(self):
+        """Check if we should use KDE Wayland (kscreen) backend."""
+        return self.session_type == 'wayland' and self.desktop_env == 'kde'
+
+    def _use_mutter_wayland(self):
+        """Check if we should use Mutter (GNOME) Wayland backend."""
+        return self.session_type == 'wayland' and self.desktop_env != 'kde'
+
     def get_displays(self):
         """Get list of connected displays."""
+        if self._use_kde_wayland():
+            return self._get_displays_kde()
         if self.session_type == 'wayland':
             return self._get_displays_wayland()
         return self._get_displays_x11()
 
     def is_display_active(self, display_name):
         """Check if a display is currently active (enabled and has geometry)."""
+        if self._use_kde_wayland():
+            return self._is_display_active_kde(display_name)
         if self.session_type == 'wayland':
             return self._is_display_active_wayland(display_name)
         return self._is_display_active_x11(display_name)
@@ -94,18 +108,24 @@ class DisplayManager:
             display_name: Name of the display (e.g., 'eDP-1', 'eDP-2')
             scale: Optional scale factor (e.g., 1.60 means UI appears 1.6x larger)
         """
+        if self._use_kde_wayland():
+            return self._enable_display_kde(display_name, scale)
         if self.session_type == 'wayland':
             return self._enable_display_wayland(display_name, scale)
         return self._enable_display_x11(display_name, scale)
 
     def disable_display(self, display_name):
         """Disable/turn off a display."""
+        if self._use_kde_wayland():
+            return self._disable_display_kde(display_name)
         if self.session_type == 'wayland':
             return self._disable_display_wayland(display_name)
         return self._disable_display_x11(display_name)
 
     def get_display_geometry(self, display_name):
         """Get the geometry (position and size) of a display."""
+        if self._use_kde_wayland():
+            return self._get_display_geometry_kde(display_name)
         if self.session_type == 'wayland':
             return self._get_display_geometry_wayland(display_name)
         return self._get_display_geometry_x11(display_name)
@@ -965,6 +985,219 @@ except Exception as e:
         self.logger.error("  For Wayland: sudo apt install imv")
         self.logger.error("  For X11: sudo apt install feh")
         return None
+
+    # ------------------------------------------------------------------
+    # KDE Wayland backend (kscreen-doctor)
+    # ------------------------------------------------------------------
+
+    def _kscreen_get_outputs(self):
+        """Parse kscreen-doctor output to get display info.
+
+        Returns a list of dicts: {
+            'name': connector name (e.g. 'eDP-1'),
+            'enabled': bool,
+            'resolution': 'WxH' or None,
+            'position': 'X,Y' or None,
+            'scale': float,
+            'priority': int or None,
+        }
+        """
+        try:
+            result = subprocess.run(
+                ['kscreen-doctor', '--outputs'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                self.logger.error(f"kscreen-doctor failed: {result.stderr.strip()}")
+                return []
+
+            outputs = []
+            current = None
+            for line in result.stdout.splitlines():
+                stripped = line.strip()
+
+                # New output block: "Output: N eDP-1 ..."
+                if stripped.startswith('Output:'):
+                    if current:
+                        outputs.append(current)
+                    parts = stripped.split()
+                    # parts: ['Output:', '<id>', '<name>', ...]
+                    name = parts[2] if len(parts) > 2 else 'unknown'
+                    enabled = 'enabled' in stripped.lower()
+                    current = {
+                        'name': name,
+                        'enabled': enabled,
+                        'resolution': None,
+                        'position': None,
+                        'scale': 1.0,
+                        'priority': None,
+                    }
+
+                if current is None:
+                    continue
+
+                if stripped.startswith('Geometry:'):
+                    # "Geometry: 0,0 2880x1800"
+                    geo_parts = stripped.split()
+                    if len(geo_parts) >= 3:
+                        current['position'] = geo_parts[1]
+                        current['resolution'] = geo_parts[2]
+
+                if stripped.startswith('Scale:'):
+                    try:
+                        current['scale'] = float(stripped.split()[1])
+                    except (IndexError, ValueError):
+                        pass
+
+                if stripped.startswith('Priority:'):
+                    try:
+                        current['priority'] = int(stripped.split()[1])
+                    except (IndexError, ValueError):
+                        pass
+
+            if current:
+                outputs.append(current)
+
+            return outputs
+
+        except FileNotFoundError:
+            self.logger.error("kscreen-doctor not found. Install kscreen: sudo apt install kscreen")
+            return []
+        except Exception as e:
+            self.logger.error(f"Failed to query kscreen-doctor: {e}")
+            return []
+
+    def _kscreen_find_output(self, display_name):
+        """Find a specific output by connector name."""
+        for out in self._kscreen_get_outputs():
+            if out['name'] == display_name:
+                return out
+        return None
+
+    def _get_displays_kde(self):
+        """Get list of connected displays via kscreen-doctor."""
+        outputs = self._kscreen_get_outputs()
+        if not outputs:
+            self.logger.warning("KDE: kscreen-doctor returned no outputs, falling back to X11")
+            return self._get_displays_x11()
+
+        displays = []
+        for out in outputs:
+            displays.append({
+                'name': out['name'],
+                'primary': out.get('priority') == 1,
+            })
+        return displays
+
+    def _is_display_active_kde(self, display_name):
+        """Check if a display is active via kscreen-doctor."""
+        out = self._kscreen_find_output(display_name)
+        if out is None:
+            return False
+        return out['enabled']
+
+    def _enable_display_kde(self, display_name, scale=None):
+        """Enable a display via kscreen-doctor."""
+        try:
+            # Determine resolution
+            if display_name == "eDP-1":
+                res = f"{self.OLED_RESOLUTION_WH[0]}x{self.OLED_RESOLUTION_WH[1]}"
+            elif display_name == "eDP-2":
+                res = f"{self.EINK_RESOLUTION_WH[0]}x{self.EINK_RESOLUTION_WH[1]}"
+            else:
+                res = None
+
+            # Build kscreen-doctor command
+            # Format: output.<name>.enable output.<name>.mode.<WxH> output.<name>.scale.<S>
+            parts = [f'output.{display_name}.enable']
+            if res:
+                parts.append(f'output.{display_name}.mode.{res}')
+            if scale is not None and scale != 1.0:
+                parts.append(f'output.{display_name}.scale.{scale}')
+
+            cmd = ['kscreen-doctor'] + parts
+            self.logger.info(f"KDE: enabling {display_name}: {' '.join(cmd)}")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                self.logger.error(f"kscreen-doctor enable failed: {result.stderr.strip()}")
+                return False
+
+            time.sleep(0.5)
+
+            if self._is_display_active_kde(display_name):
+                scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
+                self.logger.info(f"Enabled display: {display_name}{scale_info}")
+                return True
+            else:
+                self.logger.error(f"Failed to enable display: {display_name} (not active after command)")
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Failed to enable display via kscreen-doctor: {e}")
+            return False
+
+    def _disable_display_kde(self, display_name):
+        """Disable a display via kscreen-doctor."""
+        try:
+            cmd = ['kscreen-doctor', f'output.{display_name}.disable']
+            self.logger.info(f"KDE: disabling {display_name}")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                self.logger.error(f"kscreen-doctor disable failed: {result.stderr.strip()}")
+                return False
+
+            time.sleep(0.5)
+
+            if not self._is_display_active_kde(display_name):
+                self.logger.info(f"Disabled display: {display_name}")
+                return True
+            else:
+                self.logger.error(f"Failed to disable display: {display_name} (still active)")
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Failed to disable display via kscreen-doctor: {e}")
+            return False
+
+    def _get_display_geometry_kde(self, display_name):
+        """Get display geometry from kscreen-doctor."""
+        out = self._kscreen_find_output(display_name)
+        if not out or not out['enabled']:
+            self.logger.warning(f"Could not find geometry for {display_name}")
+            return None
+
+        try:
+            # Parse position "X,Y"
+            x, y = 0, 0
+            if out['position']:
+                pos_parts = out['position'].split(',')
+                x = int(pos_parts[0])
+                y = int(pos_parts[1])
+
+            # Parse resolution "WxH"
+            width, height = 0, 0
+            if out['resolution']:
+                res_parts = out['resolution'].split('x')
+                width = int(res_parts[0])
+                height = int(res_parts[1])
+
+            # Apply scale to get logical size
+            scale = out.get('scale', 1.0)
+            logical_width = int(width / scale) if scale else width
+            logical_height = int(height / scale) if scale else height
+
+            return {
+                'width': logical_width,
+                'height': logical_height,
+                'x': x,
+                'y': y,
+            }
+
+        except (ValueError, IndexError) as e:
+            self.logger.error(f"Failed to parse geometry for {display_name}: {e}")
+            return None
 
     # ------------------------------------------------------------------
     # Utilities
