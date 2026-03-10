@@ -126,8 +126,8 @@ class DisplayManager:
         """Force the physical panel out of DPMS standby.
 
         On X11 this uses ``xset dpms force on``.
-        On GNOME Wayland it deactivates the screensaver and simulates
-        a key press via ``xdotool`` (runs under XWayland) as a fallback.
+        On Wayland it deactivates the GNOME screensaver via D-Bus and
+        activates the login session via loginctl.
         """
         if self.session_type != 'wayland':
             # X11 path
@@ -139,7 +139,7 @@ class DisplayManager:
                 self.logger.warning(f"xset dpms force on failed: {e}")
             return
 
-        # Wayland / GNOME path — try multiple methods
+        # Wayland / GNOME path
         # 1. Deactivate GNOME Screensaver via D-Bus
         try:
             subprocess.run(
@@ -152,18 +152,8 @@ class DisplayManager:
         except Exception as e:
             self.logger.warning(f"Wayland: GNOME ScreenSaver D-Bus failed: {e}")
 
-        # 2. Simulate a harmless key press to trigger user-activity and wake
-        #    the panel. xdotool works under XWayland.
+        # 2. Activate the login session (works even without a screensaver)
         try:
-            subprocess.run(['xdotool', 'key', 'shift'],
-                           capture_output=True, timeout=5)
-            self.logger.info("Wayland: sent xdotool key press to wake display")
-        except Exception as e:
-            self.logger.warning(f"Wayland: xdotool wake failed: {e}")
-
-        # 3. Use loginctl to unlock the session (works even without a screensaver)
-        try:
-            # Get the session ID for the current user
             result = subprocess.run(['loginctl', 'show-user', os.environ.get('USER', ''),
                                      '--property=Sessions', '--value'],
                                     capture_output=True, text=True, timeout=5)
@@ -276,6 +266,11 @@ class DisplayManager:
 
             if native_width and native_height:
                 cmd.extend(['--mode', f'{native_width}x{native_height}'])
+                # Explicit position at origin — without --pos xrandr may
+                # place the display beside the other output, creating an
+                # invisible extended desktop where the pointer can roam
+                # but clicks don't hit any visible window.
+                cmd.extend(['--pos', '0x0'])
 
                 if scale is not None and scale != 1.0:
                     scale_inv = 1.0 / scale
@@ -290,7 +285,7 @@ class DisplayManager:
                     cmd.extend(['--panning', f'{native_width}x{native_height}'])
                     cmd.extend(['--scale', '1x1'])
             else:
-                cmd.append('--auto')
+                cmd.extend(['--auto', '--pos', '0x0'])
 
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             if result.returncode != 0:
