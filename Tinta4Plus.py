@@ -265,7 +265,7 @@ class EInkControlGUI:
         # Default settings
         defaults = {
             'display_scale': 1.75,
-            'refresh_period': 15,
+            'refresh_period': 0,
             'autoswitch_theme': True
         }
 
@@ -368,11 +368,11 @@ class EInkControlGUI:
 
         self.eink_enabled_var = tk.BooleanVar(value=False)
         self.eink_toggle_btn = tk.Button(eink_toggle_frame, text="eInk Disabled",
-                                         bg="yellow", fg="black",
+                                         bg="#FF8C00", fg="white",
                                          font=('TkDefaultFont', 10, 'bold'),
                                          relief=tk.RAISED, bd=3,
                                          command=self.on_eink_toggled,
-                                         activebackground="#b8aa00",  # Darker yellow
+                                         activebackground="#CC7000",  # Darker orange
                                          activeforeground="black",
                                          padx=20, pady=10)
         self.eink_toggle_btn.pack(expand=True, fill=tk.X)
@@ -411,14 +411,14 @@ class EInkControlGUI:
         refresh_period_container.grid(row=3, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
         refresh_period_container.columnconfigure(0, weight=1)
 
-        self.refresh_period_var = tk.IntVar(value=15)
+        self.refresh_period_var = tk.IntVar(value=0)
         self.refresh_period_slider = ttk.Scale(refresh_period_container, from_=0, to=60,
                                               orient=tk.HORIZONTAL,
                                               variable=self.refresh_period_var,
                                               command=self.on_refresh_period_changed)
         self.refresh_period_slider.grid(row=0, column=0, sticky=(tk.W, tk.E))
 
-        self.refresh_period_label = ttk.Label(refresh_period_container, text="15")
+        self.refresh_period_label = ttk.Label(refresh_period_container, text="0")
         self.refresh_period_label.grid(row=0, column=1, padx=(5, 0))
 
         # Display scale slider
@@ -516,18 +516,22 @@ class EInkControlGUI:
 
         # Buy Me A Coffee button (right side)
         self.coffee_btn = tk.Button(version_coffee_frame, text="Buy Me A Coffee",
-                                   bg="yellow", fg="black",
+                                   bg="#FF8C00", fg="white",
                                    font=('TkDefaultFont', 8),
                                    relief=tk.RAISED, bd=2,
                                    command=self.on_buy_coffee,
-                                   activebackground="#b8aa00",  # Darker yellow
-                                   activeforeground="black",
+                                   activebackground="#CC7000",  # Darker orange
+                                   activeforeground="white",
                                    padx=8, pady=4)
         self.coffee_btn.grid(row=0, column=1, sticky=tk.E)
 
         # Bind hover effects for coffee button
-        self.coffee_btn.bind("<Enter>", lambda e: self.coffee_btn.config(bg="#b8aa00"))
-        self.coffee_btn.bind("<Leave>", lambda e: self.coffee_btn.config(bg="yellow"))
+        self.coffee_btn.bind("<Enter>", lambda e: self.coffee_btn.config(bg="#CC7000"))
+        self.coffee_btn.bind("<Leave>", lambda e: self.coffee_btn.config(bg="#FF8C00"))
+
+        # Keyboard shortcuts
+        self.root.bind_all('<F5>', lambda e: self.on_refresh_full() if self.eink_enabled_var.get() else None)
+        self.root.bind_all('<Control-r>', lambda e: self.on_refresh_full() if self.eink_enabled_var.get() else None)
 
         # Initial log message
         self.log_message("Application started")
@@ -993,7 +997,7 @@ class EInkControlGUI:
 
             if response:
                 self.eink_enabled_var.set(False)
-                self.eink_toggle_btn.config(text="eInk Disabled", bg="yellow", fg="black")
+                self.eink_toggle_btn.config(text="eInk Disabled", bg="#FF8C00", fg="white")
                 self.update_status("E-Ink display disabled")
 
                 # Disable frontlight automatically when switching to OLED
@@ -1035,6 +1039,16 @@ class EInkControlGUI:
                     self.log_message(f"✓ E-Ink display ({self.DISPLAY_EINK}) disabled")
                 else:
                     self.log_message(f"⚠ Failed to disable E-Ink display on {self.DISPLAY_EINK}", level='error')
+
+                # Step 5b: Wake OLED panel again — disabling eDP-2 can trigger
+                # another DPMS standby event on eDP-1 under X11.
+                if self.display_mgr.session_type != 'wayland':
+                    try:
+                        import subprocess as _sp
+                        _sp.run(['xset', 'dpms', 'force', 'on'],
+                                capture_output=True, timeout=5)
+                    except Exception:
+                        pass
 
                 # Step 6: Map touchscreen input back to OLED display
                 self.log_message("Mapping touchscreen input to OLED display...")
@@ -1189,14 +1203,14 @@ class EInkControlGUI:
                 # Currently green (enabled) - use darker green
                 self.eink_toggle_btn.config(bg="#006400")  # Dark green
             else:
-                # Currently yellow (disabled) - use darker yellow
-                self.eink_toggle_btn.config(bg="#b8aa00")  # Darker yellow
+                # Currently orange (disabled) - use darker orange
+                self.eink_toggle_btn.config(bg="#CC7000")  # Darker orange
         else:
             # Mouse leaving - restore original color
             if self.eink_enabled_var.get():
                 self.eink_toggle_btn.config(bg="green")
             else:
-                self.eink_toggle_btn.config(bg="yellow")
+                self.eink_toggle_btn.config(bg="#FF8C00")
 
     def on_buy_coffee(self):
         """Handle Buy Me A Coffee button click"""

@@ -1,79 +1,194 @@
-# Tinta4Plus
-Now you can use the eInk display with Linux on the Lenovo ThinkBook Gen 4 Plus laptop!
+# Tinta4PlusU (Universal)
+
+Linux GUI for controlling the **color eInk display** on the **Lenovo ThinkBook Plus Gen 4 IRU**.
+
+This is a universal fork of [Tinta4Plus](https://github.com/joncox123/Tinta4Plus) by Jon Cox, with broader desktop environment support and a system installer.
 
 [![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&slug=joncox&button_colour=FFDD00&font_colour=000000&font_family=Inter&outline_colour=000000&coffee_colour=ffffff)](https://www.buymeacoffee.com/joncox)
 
-<img src="eink-disable.jpg" alt="Diagram" width="60%"/>
+<img src="eink-disable.jpg" alt="ThinkBook Plus Gen 4 eInk" width="60%"/>
 
-## BRIEF WARNING AND DISCLAIMER
-This software was independently developed without any input, support or documentation from either eInk or Lenovo. It has only been tested on one system, my own. While it has never damaged my hardware, either temporarily or permanently, it is possible for it to do so if it malfunctions. Temporary impairment can occur should corrupted or invalid commands be written to the Embedded Controller or the T-CON, and permanent damage is theoretically possible. If this occurs, you may need to hard reboot your system or even hard reset the EC (see instructions below). This software is currently a proof-of-concept demonstration, alpha-quality and has known bugs. Do not use this software if you are not willing to accept the risks of temporary or permanent hardware damage or data loss and lost productivity.
+## Supported configurations
 
-## System Requirements and Installation
-Tinta4Plus supports the following configurations:
-- **Ubuntu 24.04 LTS** or later with **GNOME** (X11 or Wayland)
-- **Xubuntu 25.04** (Plucky Puffin) with **XFCE** (X11) — https://cdimage.ubuntu.com/xubuntu/releases/plucky/release/
+| Desktop | Session | Status |
+|---------|---------|--------|
+| GNOME | X11 | Tested |
+| GNOME | Wayland | Tested (Mutter D-Bus) |
+| XFCE | X11 | Tested |
+| KDE Plasma | X11 | Supported |
+| KDE Plasma | Wayland | Supported (kscreen) |
 
-The session type (X11 / Wayland) and desktop environment are auto-detected at startup.
+Base OS: **Ubuntu 24.04 LTS** or later (including Xubuntu, Kubuntu).
 
-### Required packages (all configurations)
+## Hardware
+
+- OLED: 2880x1800 on eDP-1
+- eInk: 2560x1600 color on eDP-2
+- eInk T-CON controller: USB (VID `048d`, PID `8957`)
+- Embedded Controller: I/O ports `0x66`/`0x62` (frontlight, brightness)
+
+## Quick start
+
+### 1. Clone the repository
+
 ```bash
-sudo apt install python3-portio python3-tk python3-usb feh imv mokutil
+git clone https://github.com/Tinta4Plus-Universal/Tinta4Plus-Universal.git
+cd Tinta4Plus-Universal
 ```
 
-### Additional packages by desktop environment
-- **GNOME**: `sudo apt install python3-dbus` (recommended — enables native D-Bus display control; falls back to gdbus CLI if absent)
-- **XFCE**: `sudo apt install x11-xserver-utils xfconf`
+### 2. Disable Secure Boot
 
-### Other requirements
-- Disable Secure Boot in order to control the eInk frontlight and other hardware features
-  - Reboot your laptop and press ENTER repeatedly immediately after power on until you get the boot menu.
-  - Hit the approprite F key to enter BIOS settings.
-  - Navigate to Security and scroll down (near the bottom) to find Secure Boot. Change to Disabled.
-  - Save BIOS settings and reboot.
-- Root permissions are required to write to the Embedded Controller (e.g. for frontlight control) and for the eInk controller (T-CON)
+Frontlight control requires EC access, which needs Secure Boot disabled:
 
-To run the app, simply cd into the extracted directory and execute: ./Tinta4Plus.py
+1. Reboot and press **Enter** repeatedly right after power-on to get the boot menu.
+2. Press the appropriate F-key to enter BIOS settings.
+3. Navigate to **Security** > **Secure Boot** > set to **Disabled**.
+4. Save and reboot.
 
-## Missing Features and Known Bugs
-- Display scaling is not being handeled correctly during switch, which also causes the eInk touch mapping to be off.
-- Haven't figured out how to change the eInk contrast yet.
-- Sometimes enabling the frontlight will return with an error, even though it is enabled. This is because the resulting EC register value can differ.
-- No screen folding or swivel detection yet. eInk activation is purely a manual process.
-- No screen rotation features.
-- Does not disable keyboard or touchpad when activating eInk (e.g. when folding screen down).
-- Eliminate need to request root permissions through signed kernel driver, system daemon, etc.
-- Haven't figured out how to get the default THINKBOOK privacy image to persist on the eInk display when the display is disabled. I can flash it briefly, but it gets overwritten by a refresh. Regardless, I think the Tinta4Plus logo/image is cooler, so I don't plan on "fixing" this.
+### 3. Install
 
-# END USER LICENSE AGREEMENT
-Copyright (c) 2025 Jon Cox (joncox123). All rights reserved.
+There are two ways to install: **compiled binaries** (recommended) or **Python scripts** (easier to debug/modify).
 
-IMPORTANT - READ CAREFULLY BEFORE USING THIS SOFTWARE
+#### Option A: Compiled binaries (recommended)
 
-This software is provided "AS IS", without any warranty of any kind. It may contain bugs or other defects that result in data loss, corruption, hardware damage, lost productivity or other issues. Use at your own risk.
+Build first, then install:
 
-WARNING: This software may temporarily or permanently render your hardware inoperable. It may corrupt or damage the Embedded Controller or eInk T-CON controller in your laptop. This software is a prototype, pre-production, alpha quality. It is only known to work, albeit with some bugs, on the author's specific hardware and Linux configuration.
+```bash
+# Install build dependency
+pip install pyinstaller
 
-### REQUIREMENTS AND RISKS:
-1. Ubuntu 24.04 LTS or later with GNOME, or Xubuntu 25.04 with XFCE4 desktop environment
-2. Xorg (X11) or Wayland windowing system (Wayland support uses GNOME Mutter D-Bus API)
-3. Frontlight control requires access to the embedded controller (EC) which requires disabling Secure Boot in the BIOS. Disabling Secure Boot may reduce system security and expose you to certain types of attacks, including viruses, ransomware, rootkits and bootkits.
-4. Root access is required to write to the EC
-5. This software writes to low-level hardware, including the EC and the eInk display's T-CON
-6. The software can potentially cause temporary or permanent damage to your hardware or data loss.
-7. Should issues occur, usually a reboot is sufficient, but in some cases a full EC reset may be required. Hardware damage is theoretically possible.
-8. This software was created without any input, endorcement or documentation from eInk or Lenovo and has been tested only on a single laptop. It is currently unknown whether it works correctly on different hardware revisions of the same laptop series.
-9. If the privacy image fails to properly display when switching from eInk to OLED screens, or if the software crashes or powers off before the privacy image sequence can complete, the eInk display will show a persistent image of the last screen until a full reboot. This could potentially expose personal information such as passwords, financial information, proprietary information like intellectual property or information that is embrassing to the user. Therefore, always ensure that the eInk display has been cleared of such information after use, and if not, perform a full reboot.
+# Build the binaries
+bash build.sh
 
-### DO NOT MODIFY THE CODE IN ECController.py or EInkUSBController.py, as doing so may cause hardware damage.
+# Install system-wide
+sudo bash installer.sh
+# Choose option 1 (compiled binary) when prompted
+```
 
-### LIABILITY:
-The author is not responsible for any damage, data loss, lost productivity, or other issues caused by use of this software.
+#### Option B: Python scripts (development)
 
-### IN THE EVENT OF HARDWARE PROBLEMS
-Should unexpected behvior occur, usually a full reboot will resolve the issue. In rare cases, a full reset of the Embedded Controller (EC) may be required. The procedure for resetting the EC is as follows:
+```bash
+sudo bash installer.sh
+# Choose option 2 (Python scripts) when prompted
+```
 
-1. Power off the laptop and disconnect the AC power adapter.
-2. Use a pin, small paperclick or SIM card ejector tool to press and HOLD the small reset button for AT LEAST 60 seconds (time with a clock!). The reset button is located on the bottom of the laptop just to one side of the fan vent grille and looks like an extra, out of place hole. It has a tiny symbol that looks like an arch with an arrow on one end.
-3. After holding the reset for 60 seconds, press and HOLD the power button continuously for 60 seconds.
-4. Lastly, press the power button normally (may require a few presses or waiting some seconds) to power up the laptop. Typically, the screen will stay blank for some time, often up to 60 seconds, before the laptop powers up normally.
-5. Check your BIOS settings by pressing ENTER at boot to ensure Secure Boot is disabled again.
+Or run directly without installing:
+
+```bash
+# Install dependencies manually
+sudo apt install python3-tk python3-usb libusb-1.0-0 feh
+pip install portio pyusb sv-ttk
+
+# Run
+./Tinta4Plus.py
+```
+
+### 4. Launch
+
+After installation, launch from the terminal or application menu:
+
+```bash
+tinta4plusu
+```
+
+The app also autostarts on login (via `/etc/xdg/autostart/`). In autostart mode, the helper daemon is **not** launched automatically to avoid a password prompt at login — click **Connect to Helper** when you need eInk control.
+
+## Usage
+
+### Switching displays
+
+Click the **eInk Enabled/Disabled** toggle button to switch between OLED and eInk. The switching sequence:
+
+- **To eInk**: enables eDP-2, powers on the T-CON, enables frontlight, sets reading mode, then disables eDP-1.
+- **To OLED**: shows a privacy image on eInk (to clear sensitive content), powers off the T-CON, re-enables eDP-1, then disables eDP-2.
+
+### eInk display modes
+
+- **Reading mode**: optimized for text, slower refresh, less ghosting.
+- **Dynamic mode**: faster refresh for scrolling/interaction, more ghosting.
+
+### Refreshing the display (clearing ghosts)
+
+eInk panels accumulate ghosting (afterimages) from partial updates. You can clear it with:
+
+- **Refresh button**: click "Refresh eInk (Clear Ghosts)" in the GUI.
+- **Keyboard shortcuts**: press **F5** or **Ctrl+R** while the app is focused.
+- **Periodic auto-refresh**: adjust the "Refresh period" slider (0 = off, up to 60 seconds). Defaults to off.
+
+### Frontlight
+
+Use the brightness slider (0–8) to control the eInk frontlight. The frontlight turns on automatically when switching to eInk and off when switching back to OLED.
+
+### Display scaling
+
+The "Display Scale" slider controls the UI scale on the eInk display (default: 1.75x). This sets the xrandr scale and panning dimensions so that the desktop fits the eInk panel.
+
+### Theme auto-switching
+
+When "Auto-switch theme" is checked (default), the app switches to a high-contrast theme on eInk and back to Adwaita-dark on OLED.
+
+### Settings persistence
+
+Settings (display scale, refresh period, theme auto-switch) are saved to `~/.config/Tinta4PlusU/settings.json` and restored on next launch.
+
+## Uninstalling
+
+```bash
+sudo bash installer.sh --uninstall
+```
+
+This removes binaries/scripts from `/opt/tinta4plusu`, symlinks from `/usr/local/bin`, desktop entries, and the PolicyKit policy.
+
+## Architecture
+
+Two-process model communicating via Unix socket (`/tmp/tinta4plusu.sock`):
+
+- **Tinta4Plus.py** — unprivileged tkinter GUI, launched as the user.
+- **HelperDaemon.py** — privileged daemon (root via `pkexec`), controls EC and USB hardware.
+
+| Module | Role | Runs as |
+|--------|------|---------|
+| `Tinta4Plus.py` | Main GUI | User |
+| `HelperDaemon.py` | Privileged daemon | Root |
+| `DisplayManager.py` | Display switching (xrandr / Mutter D-Bus / kscreen) | User |
+| `ThemeManager.py` | GTK theme switching | User |
+| `HelperClient.py` | Socket IPC client | User |
+| `ECController.py` | Embedded Controller I/O | Root |
+| `EInkUSBController.py` | USB T-CON controller | Root |
+| `WatchdogTimer.py` | Daemon watchdog (20s timeout) | Root |
+
+## PolicyKit
+
+During installation you can optionally install a PolicyKit policy (`org.tinta4plusu.helper.policy`) that caches authentication so you don't need to re-enter your password every time the helper starts. The first launch still requires authentication.
+
+## Troubleshooting
+
+### Black screen after switching back to OLED
+
+The app forces DPMS on after re-enabling eDP-1, but if the OLED stays black, close and reopen the laptop lid to wake it.
+
+### Frontlight error on enable
+
+Sometimes the EC register readback differs from the written value. The frontlight is usually enabled despite the error — check visually.
+
+### EC reset procedure
+
+If the laptop becomes unresponsive or the eInk/EC behaves erratically:
+
+1. Power off and disconnect the AC adapter.
+2. Press and **hold** the EC reset pinhole (bottom of laptop, near the fan vent) for **60 seconds**.
+3. Press and **hold** the power button for **60 seconds**.
+4. Press the power button normally to boot (may take up to 60 seconds to show anything on screen).
+5. Re-check BIOS to ensure Secure Boot is still disabled.
+
+## Warning and disclaimer
+
+This software was independently developed without any input, support, or documentation from eInk or Lenovo. It writes to low-level hardware (Embedded Controller, USB T-CON) and can potentially cause temporary or permanent hardware damage. It has been tested on a limited number of systems.
+
+**Do not modify `ECController.py` or `EInkUSBController.py`** unless you understand the hardware implications.
+
+Use at your own risk. See the full [EULA](README_EULA_INSTRUCTIONS_WARNINGS.txt) for details.
+
+## Credits
+
+Original project by [Jon Cox](https://github.com/joncox123) — [Buy him a coffee](https://www.buymeacoffee.com/joncox)

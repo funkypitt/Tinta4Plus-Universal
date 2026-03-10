@@ -239,9 +239,21 @@ class DisplayManager:
             else:
                 cmd.append('--auto')
 
-            subprocess.run(cmd, capture_output=True, timeout=5)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                self.logger.warning(f"xrandr returned {result.returncode}: {result.stderr.strip()}")
 
-            time.sleep(0.2)
+            time.sleep(0.5)
+
+            # Force DPMS on to wake the panel — xrandr may enable the output
+            # in the display server while the physical panel stays in standby.
+            try:
+                subprocess.run(['xset', 'dpms', 'force', 'on'],
+                               capture_output=True, timeout=5)
+            except Exception as dpms_err:
+                self.logger.warning(f"xset dpms force on failed: {dpms_err}")
+
+            time.sleep(0.3)
 
             if self._is_display_active_x11(display_name):
                 scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
