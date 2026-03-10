@@ -973,7 +973,12 @@ class EInkControlGUI:
             self.btn_set_dynamic.config(state='disabled')
             self.btn_set_reading.config(state='disabled')
 
-            # Step 4: Display random privacy image on E-Ink screen
+            # Step 4: Switch to dynamic mode for color rendering before showing privacy image
+            self.log_message("Switching to dynamic mode for color privacy image...")
+            self.execute_helper_command('set-dynamic')
+            time.sleep(0.5)  # Give T-CON time to switch mode
+
+            # Step 5: Display random privacy image on E-Ink screen
             chosen = random.choice(self.EINK_DISABLED_IMAGES)
             image_path = chosen
             if not os.path.exists(image_path):
@@ -1000,7 +1005,7 @@ class EInkControlGUI:
             else:
                 self.log_message(f"Warning: Privacy image not found: {chosen}", level='error')
 
-            # Step 4: Disable E-Ink via USB controller
+            # Step 6: Disable E-Ink via USB controller
             self.log_message("Disabling E-Ink display via USB controller...")
             response = self.execute_helper_command('disable-eink')
 
