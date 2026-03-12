@@ -297,7 +297,7 @@ class EInkControlGUI:
         defaults = {
             'display_scale': 1.75,
             'refresh_period': 0,
-            'autoswitch_theme': True,
+            'autoswitch_theme': False,
             'flip_countdown': 5
         }
 
@@ -499,7 +499,7 @@ class EInkControlGUI:
         scale_container.grid(row=4, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
 
         # Autoswitch theme checkbox
-        self.autoswitch_theme_var = tk.BooleanVar(value=True)
+        self.autoswitch_theme_var = tk.BooleanVar(value=False)
         self.autoswitch_theme_checkbox = ttk.Checkbutton(
             display_frame,
             text="Autoswitch theme (HighContrast ↔ Adwaita-dark)",
