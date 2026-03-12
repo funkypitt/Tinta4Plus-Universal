@@ -124,6 +124,70 @@ class DisplayManager:
             return self._disable_display_wayland(display_name)
         return self._disable_display_x11(display_name)
 
+    def get_display_scale(self, display_name):
+        """Get the current scale factor of a display.
+
+        Returns the scale as a float (e.g., 1.0, 1.25, 1.5), or None if
+        the display is not active or the scale cannot be determined.
+        """
+        if self._use_kde_wayland():
+            return self._get_display_scale_kde(display_name)
+        if self._use_mutter_wayland():
+            return self._get_display_scale_wayland(display_name)
+        return self._get_display_scale_x11(display_name)
+
+    def _get_display_scale_x11(self, display_name):
+        """Get display scale from xrandr --verbose (Transform matrix)."""
+        try:
+            result = subprocess.run(
+                ['xrandr', '--query', '--verbose'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                return None
+
+            # Parse output: find the display section, then its Transform matrix
+            in_display = False
+            for line in result.stdout.split('\n'):
+                if display_name in line and 'connected' in line:
+                    in_display = True
+                    continue
+                if in_display and line and not line[0].isspace():
+                    # Reached next display section
+                    break
+                if in_display and 'Transform:' in line:
+                    # Transform matrix first row: "Transform:  0.571429 0.000000 0.000000"
+                    # The (0,0) element is the inverse of the scale
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            scale_inv = float(parts[1])
+                            if scale_inv > 0:
+                                return round(1.0 / scale_inv, 2)
+                        except ValueError:
+                            pass
+            return None
+        except Exception as e:
+            self.logger.warning(f"Failed to get X11 display scale: {e}")
+            return None
+
+    def _get_display_scale_wayland(self, display_name):
+        """Get display scale from Mutter logical monitor state."""
+        state = self._mutter_get_current_state()
+        if not state:
+            return None
+        lm = self._find_logical_monitor(state, display_name)
+        if lm:
+            return lm['scale']
+        return None
+
+    def _get_display_scale_kde(self, display_name):
+        """Get display scale from kscreen-doctor."""
+        out = self._kscreen_find_output(display_name)
+        if out and out.get('scale'):
+            return out['scale']
+        return None
+
     def wake_display(self):
         """Force the physical panel out of DPMS standby and unlock.
 

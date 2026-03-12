@@ -240,6 +240,12 @@ class EInkControlGUI:
         # Floating refresh button
         self.floating_refresh_button = None
 
+        # Saved OLED scale to restore when switching back from eInk
+        self.saved_oled_scale = None
+
+        # Sleep inhibitor file descriptor (systemd-inhibit)
+        self._sleep_inhibit_fd = None
+
         # Load settings from file (or use defaults)
         settings = self.load_settings()
 
@@ -318,6 +324,43 @@ class EInkControlGUI:
 
         except Exception as e:
             self.logger.error(f"Failed to save settings: {e}")
+
+    def _inhibit_sleep(self):
+        """Acquire a sleep/suspend inhibitor via systemd-logind D-Bus.
+
+        This prevents the system from suspending while display switching is
+        in progress.  The inhibitor is released by calling _uninhibit_sleep().
+        """
+        if self._sleep_inhibit_fd is not None:
+            return  # already held
+
+        try:
+            import dbus
+            bus = dbus.SystemBus()
+            proxy = bus.get_object('org.freedesktop.login1',
+                                   '/org/freedesktop/login1')
+            mgr = dbus.Interface(proxy, 'org.freedesktop.login1.Manager')
+            fd = mgr.Inhibit(
+                'sleep',                       # what
+                'Tinta4PlusU',                 # who
+                'Switching displays',          # why
+                'block',                       # mode
+            )
+            # fd is a dbus.UnixFd; take ownership of the underlying file descriptor
+            self._sleep_inhibit_fd = fd.take()
+            self.logger.info("Acquired sleep inhibitor")
+        except Exception as e:
+            self.logger.warning(f"Could not acquire sleep inhibitor: {e}")
+
+    def _uninhibit_sleep(self):
+        """Release the sleep/suspend inhibitor."""
+        if self._sleep_inhibit_fd is not None:
+            try:
+                os.close(self._sleep_inhibit_fd)
+                self.logger.info("Released sleep inhibitor")
+            except OSError as e:
+                self.logger.warning(f"Error releasing sleep inhibitor: {e}")
+            self._sleep_inhibit_fd = None
 
     def build_ui(self):
         """Build the tkinter user interface"""
@@ -897,6 +940,20 @@ class EInkControlGUI:
             # Enabling E-Ink
             self.log_message("Enabling E-Ink display...")
 
+            # Prevent the system from sleeping while we switch displays
+            self._inhibit_sleep()
+
+            # Save the current OLED scale so we can restore it later
+            try:
+                oled_scale = self.display_mgr.get_display_scale(self.DISPLAY_OLED)
+                if oled_scale is not None:
+                    self.saved_oled_scale = oled_scale
+                    self.log_message(f"Saved OLED scale: {oled_scale}")
+                else:
+                    self.log_message("Could not read OLED scale, will use default on restore", level='warning')
+            except Exception as e:
+                self.logger.warning(f"Failed to save OLED scale: {e}")
+
             # Step 0: Switch to High Contrast theme if enabled
             if self.autoswitch_theme_var.get():
                 self.theme_mgr.set_theme(self.THEME_HIGH_CONTRAST)
@@ -975,9 +1032,15 @@ class EInkControlGUI:
                     self.logger.warning(f"Floating refresh button not available: {e}")
                     self.log_message("Floating refresh button unavailable (Wayland limitation)", level='warning')
 
+                # Display switch complete — allow sleep again
+                self._uninhibit_sleep()
+
         else:
             # Disabling E-Ink
             self.log_message("Preparing to disable E-Ink display...")
+
+            # Prevent the system from sleeping while we switch displays
+            self._inhibit_sleep()
 
             # Step 1: Stop periodic refresh timer first
             self._stop_refresh_timer()
@@ -1057,10 +1120,11 @@ class EInkControlGUI:
                             pass
                     self.eink_image_process = None
 
-                # Step 1: Enable OLED display on eDP-1 at native 2880x1800 with scale 1
-                self.log_message(f"Enabling OLED display on {self.DISPLAY_OLED} at native resolution (scale 1)...")
-                if self.display_mgr.enable_display(self.DISPLAY_OLED, scale=1.0):
-                    self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) enabled at native resolution (scale 1)")
+                # Step 1: Enable OLED display on eDP-1, restoring previous scale
+                restore_scale = self.saved_oled_scale if self.saved_oled_scale else 1.0
+                self.log_message(f"Enabling OLED display on {self.DISPLAY_OLED} with scale {restore_scale}...")
+                if self.display_mgr.enable_display(self.DISPLAY_OLED, scale=restore_scale):
+                    self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) enabled with scale {restore_scale}")
                 else:
                     self.log_message(f"⚠ Failed to enable OLED display on {self.DISPLAY_OLED}", level='error')
 
@@ -1093,7 +1157,11 @@ class EInkControlGUI:
                 # Step 7: Switch to Adwaita-dark theme if enabled
                 if self.autoswitch_theme_var.get():
                     self.theme_mgr.set_theme(self.THEME_ADWAITA_DARK)
+
+                # Display switch complete — allow sleep again
+                self._uninhibit_sleep()
             else:
+                self._uninhibit_sleep()
                 # Failed to disable - kill image viewer
                 if self.eink_image_process:
                     try:
@@ -1292,6 +1360,9 @@ class EInkControlGUI:
             self.on_eink_toggled()
 
             self.log_message("✓ Automatic switch to OLED completed")
+
+        # Release sleep inhibitor if still held
+        self._uninhibit_sleep()
 
         # Stop refresh timer
         self._stop_refresh_timer()
