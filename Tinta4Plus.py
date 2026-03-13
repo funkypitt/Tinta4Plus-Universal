@@ -178,7 +178,7 @@ class EInkControlGUI:
 
     # Configuration
     SOCKET_PATH = '/tmp/tinta4plusu.sock'
-    KEEPALIVE_INTERVAL = 2.4  # seconds (send keepalive every 2.4s, watchdog is 20s)
+    KEEPALIVE_INTERVAL = 5.0  # seconds (send keepalive every 5s, watchdog is 60s)
     SOCKET_TIMEOUT = 10.0  # seconds
     CONFIG_DIR = os.path.expanduser("~/.config/Tinta4PlusU")
     SETTINGS_FILE = os.path.join(os.path.expanduser("~/.config/Tinta4PlusU"), "settings")
@@ -219,6 +219,8 @@ class EInkControlGUI:
         # Helper client
         self.helper = HelperClient(logger)
         self.keepalive_after_id = None
+        self._keepalive_thread = None
+        self._keepalive_stop = threading.Event()
         self.helper_process = None
 
         # Managers
@@ -764,47 +766,65 @@ class EInkControlGUI:
             self.logger.warning(f"Could not check Secure Boot locally: {e}")
 
     def start_keepalive(self):
-        """Start periodic keepalive messages"""
-        if self.keepalive_after_id:
-            self.root.after_cancel(self.keepalive_after_id)
-        
-        self.keepalive_after_id = self.root.after(
-            int(self.KEEPALIVE_INTERVAL * 1000),
-            self.send_keepalive
+        """Start periodic keepalive messages in a background thread.
+
+        Using a dedicated thread instead of root.after() ensures keepalives
+        continue even when the tkinter event loop is blocked by long-running
+        operations (display switching, etc.) or when the system resumes from
+        suspend.
+        """
+        self.stop_keepalive()
+
+        self._keepalive_stop.clear()
+        self._keepalive_thread = threading.Thread(
+            target=self._keepalive_loop, daemon=True
         )
-        self.logger.info(f"Started keepalive timer ({self.KEEPALIVE_INTERVAL}s interval)")
-    
-    def send_keepalive(self):
-        """Send keepalive message to helper"""
-        if not self.helper.is_connected():
-            self.update_status("Helper disconnected - attempting restart...", error=True)
-            self.log_message("Helper disconnected, attempting to restart...", level='error')
-            self.attempt_helper_restart()
-            return  # Don't schedule next keepalive
-        
-        try:
-            response = self.helper.send_command('keepalive')
-            if not response or not response.get('success'):
-                self.logger.warning("Keepalive failed")
-                self.log_message("Keepalive failed, restarting helper...", level='error')
-                self.attempt_helper_restart()
+        self._keepalive_thread.start()
+        self.logger.info(f"Started keepalive thread ({self.KEEPALIVE_INTERVAL}s interval)")
+
+    def stop_keepalive(self):
+        """Stop the keepalive thread."""
+        self._keepalive_stop.set()
+        if self._keepalive_thread and self._keepalive_thread.is_alive():
+            self._keepalive_thread.join(timeout=3)
+        self._keepalive_thread = None
+
+    def _keepalive_loop(self):
+        """Background thread that sends keepalives at regular intervals."""
+        while not self._keepalive_stop.wait(self.KEEPALIVE_INTERVAL):
+            if not self.helper.is_connected():
+                self.root.after(0, self._on_keepalive_lost,
+                               "Helper disconnected")
                 return
 
-            # Process any hotkey notifications from the helper
-            for notif in response.get('notifications', []):
-                self._handle_hotkey_notification(notif)
+            try:
+                response = self.helper.send_command('keepalive')
+                if not response or not response.get('success'):
+                    self.root.after(0, self._on_keepalive_lost,
+                                   "Keepalive failed")
+                    return
 
-            # Schedule next keepalive
-            self.keepalive_after_id = self.root.after(
-                int(self.KEEPALIVE_INTERVAL * 1000),
-                self.send_keepalive
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Keepalive error: {e}")
-            self.update_status("Helper connection lost - restarting...", error=True)
-            self.log_message(f"ERROR: Lost connection to helper - {e}", level='error')
-            self.attempt_helper_restart()
+                # Process any hotkey notifications on the main thread
+                notifs = response.get('notifications', [])
+                if notifs:
+                    self.root.after(0, self._process_notifications, notifs)
+
+            except Exception as e:
+                self.logger.error(f"Keepalive error: {e}")
+                self.root.after(0, self._on_keepalive_lost,
+                               f"Lost connection to helper - {e}")
+                return
+
+    def _on_keepalive_lost(self, reason):
+        """Called on the main thread when keepalive detects a disconnect."""
+        self.update_status("Helper disconnected - attempting restart...", error=True)
+        self.log_message(f"ERROR: {reason}", level='error')
+        self.attempt_helper_restart()
+
+    def _process_notifications(self, notifs):
+        """Process hotkey notifications on the main thread."""
+        for notif in notifs:
+            self._handle_hotkey_notification(notif)
     
     def _handle_hotkey_notification(self, notif):
         """Process a hotkey notification received from the helper daemon."""
@@ -820,10 +840,8 @@ class EInkControlGUI:
 
     def attempt_helper_restart(self):
         """Attempt to restart the helper daemon"""
-        # Cancel any existing keepalive
-        if self.keepalive_after_id:
-            self.root.after_cancel(self.keepalive_after_id)
-            self.keepalive_after_id = None
+        # Stop keepalive thread
+        self.stop_keepalive()
         
         self.log_message("Attempting to restart helper daemon...")
         
@@ -1582,8 +1600,7 @@ class EInkControlGUI:
         self._stop_refresh_timer()
 
         # Stop keepalive
-        if self.keepalive_after_id:
-            self.root.after_cancel(self.keepalive_after_id)
+        self.stop_keepalive()
 
         # Disconnect from helper (sends shutdown command)
         if self.helper.is_connected():

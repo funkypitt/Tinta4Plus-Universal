@@ -36,7 +36,7 @@ from GlobalHotkeyListener import GlobalHotkeyListener
 # Configuration
 SOCKET_PATH = '/tmp/tinta4plusu.sock'
 PID_FILE = '/tmp/tinta4plusu.pid'
-WATCHDOG_TIMEOUT = 20.0  # seconds
+WATCHDOG_TIMEOUT = 60.0  # seconds
 HTTP_PORT = 19849  # localhost HTTP API for browser extensions (e.g. PageTurn)
 LOG_LEVEL = logging.DEBUG  # Changed to DEBUG for detailed EC port access logging
 
