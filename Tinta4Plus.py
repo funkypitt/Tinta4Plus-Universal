@@ -600,8 +600,6 @@ class EInkControlGUI:
         self.coffee_btn.bind("<Leave>", lambda e: self.coffee_btn.config(bg="#FF8C00"))
 
         # Keyboard shortcuts
-        self.root.bind_all('<F5>', lambda e: self.on_refresh_full() if self.eink_enabled_var.get() else None)
-        self.root.bind_all('<Control-r>', lambda e: self.on_refresh_full() if self.eink_enabled_var.get() else None)
         self.root.bind_all('<Help>', lambda e: self.on_refresh_full() if self.eink_enabled_var.get() else None)
 
         # Map brightness keys to frontlight control when in eInk mode

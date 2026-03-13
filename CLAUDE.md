@@ -110,11 +110,11 @@ Image resolution in frozen mode uses `sys._MEIPASS` (PyInstaller `_internal/` di
 
 ### Keyboard shortcuts
 
-- **F5**: Refresh eInk (clear ghosts)
-- **F9** (Help media key): Refresh eInk
-- **XF86MonBrightnessUp/Down**: Adjust frontlight brightness when in eInk mode
+- **Help** (Fn+F9): Refresh eInk (clear ghosts)
+- **XF86MonBrightnessUp** (Fn+F6): Increase frontlight brightness
+- **XF86MonBrightnessDown** (Fn+F5): Decrease frontlight brightness
 
-All bindings use `bind_all` on the root tkinter window, so they only work when the Tinta4PlusU GUI is focused.
+These work both in the tkinter GUI (`bind_all`) and globally via `GlobalHotkeyListener` (evdev, runs in the helper daemon as root). Only active when eInk is enabled.
 
 ### OLED wake sequence
 

@@ -23,8 +23,7 @@ except ImportError:
 HOTKEYS = {
     'KEY_BRIGHTNESSUP',
     'KEY_BRIGHTNESSDOWN',
-    'KEY_F5',
-    'KEY_F9',
+    'KEY_HELP',
 }
 
 
@@ -111,7 +110,7 @@ class GlobalHotkeyListener:
                 elif code == ecodes.KEY_BRIGHTNESSDOWN:
                     if self.on_brightness_down:
                         self._safe_call(self.on_brightness_down)
-                elif code in (ecodes.KEY_F5, ecodes.KEY_F9):
+                elif code == getattr(ecodes, 'KEY_HELP', None):
                     if self.on_refresh:
                         self._safe_call(self.on_refresh)
 
