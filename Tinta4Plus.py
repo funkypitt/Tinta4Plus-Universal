@@ -1646,6 +1646,7 @@ class EInkControlGUI:
 
         self._ui(self._start_refresh_timer)
         self._ui(self._ensure_floating_button, p['floating_button'])
+        self._verify_final_outputs(active=self.DISPLAY_EINK, inactive=self.DISPLAY_OLED, scale=p['scale'])
         self.log_message("✓ E-Ink display enabled")
 
     # --- disable ---------------------------------------------------------
@@ -1731,11 +1732,54 @@ class EInkControlGUI:
             self.log_message("✓ Keyboard layout restored")
         self._restore_dpms_timeouts()
 
+        if oled_ok:
+            self._verify_final_outputs(active=self.DISPLAY_OLED, inactive=self.DISPLAY_EINK, scale=restore_scale)
+
         if not oled_ok:
             raise SwitchError(f"could not re-enable {self.DISPLAY_OLED}")
         if not tcon_off:
             raise SwitchError("the eInk T-CON could not be powered off (OLED restored)")
         self.log_message("✓ OLED display restored")
+
+    def _verify_final_outputs(self, active, inactive, scale, settle=1.5):
+        """Worker thread: confirm the end state and correct it once if needed.
+
+        The compositor can quietly re-enable an output we just turned off
+        (seen on GNOME/X11: eDP-2 came back after a switch to OLED, and the
+        next startup check found both outputs active). Wait for things to
+        settle, then re-apply the intended configuration if it drifted.
+        """
+        time.sleep(settle)
+        try:
+            active_on = self.display_mgr.is_display_active(active)
+            inactive_on = self.display_mgr.is_display_active(inactive)
+        except Exception as e:
+            self.logger.warning(f"Final output check skipped: {e}")
+            return
+        if active_on and not inactive_on:
+            self.logger.info(f"Final output check: {active} on, {inactive} off — OK")
+            return
+
+        self.log_message(f"⚠ Output state drifted after the switch ({active}={'on' if active_on else 'off'}, "
+                         f"{inactive}={'on' if inactive_on else 'off'}) — correcting", level='warning')
+        if not active_on:
+            self.display_mgr.enable_display(active, scale=scale)
+            time.sleep(0.5)
+        if inactive_on:
+            # disable_display() refuses if it would be the last output
+            self.display_mgr.disable_display(inactive)
+            time.sleep(0.3)
+            self.display_mgr.enable_display(active, scale=scale)  # re-assert panning/scale as sole output
+        try:
+            active_on = self.display_mgr.is_display_active(active)
+            inactive_on = self.display_mgr.is_display_active(inactive)
+        except Exception:
+            return
+        if active_on and not inactive_on:
+            self.log_message(f"✓ Output state corrected: {active} on, {inactive} off")
+        else:
+            self.log_message(f"✗ Output state still wrong after correction ({active}={'on' if active_on else 'off'}, "
+                             f"{inactive}={'on' if inactive_on else 'off'})", level='error')
 
     def _set_theme(self, theme):
         """Apply a desktop theme; never let a theme failure abort a switch."""
