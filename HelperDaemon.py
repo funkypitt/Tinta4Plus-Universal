@@ -39,6 +39,7 @@ import struct
 import signal
 import threading
 import logging
+import logging.handlers
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 from WatchdogTimer import WatchdogTimer
@@ -844,7 +845,7 @@ def main():
     # Setup logging
     log_handlers = [logging.StreamHandler(sys.stderr)]
     try:
-        log_handlers.append(logging.FileHandler(LOG_FILE, mode='w'))
+        log_handlers.append(logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3))
         # The log holds no secrets (hotkey names, EC register values) and is
         # the first thing asked for in bug reports, so let users read it.
         os.chmod(LOG_FILE, 0o644)

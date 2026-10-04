@@ -37,8 +37,9 @@ DISPLAY_EINK = 'eDP-2'
 # Privacy images shipped next to the scripts: every eink-disable<N>.jpg
 # (same discovery rule as Tinta4Plus.py, so both tools see the same set)
 EINK_DISABLED_IMAGES = sorted(
-    os.path.basename(p) for p in glob.glob(os.path.join(script_dir, 'eink-disable*.jpg'))
-    if os.path.basename(p)[len('eink-disable'):-len('.jpg')].isdigit())
+    (os.path.basename(p) for p in glob.glob(os.path.join(script_dir, 'eink-disable*.jpg'))
+     if os.path.basename(p)[len('eink-disable'):-len('.jpg')].isdigit()),
+    key=lambda n: int(n[len('eink-disable'):-len('.jpg')]))
 DEFAULT_SCALE = 1.0
 DEFAULT_BRIGHTNESS = 4
 

@@ -40,6 +40,7 @@ import fcntl
 import time
 import threading
 import logging
+import logging.handlers
 import random
 import webbrowser
 import json
@@ -98,8 +99,8 @@ def discover_privacy_images():
     privacy image).
     """
     names = [os.path.basename(p) for p in glob.glob(os.path.join(_base_dir(), 'eink-disable*.jpg'))]
-    images = sorted(n for n in names if n[len('eink-disable'):-len('.jpg')].isdigit())
-    return images
+    numbered = [n for n in names if n[len('eink-disable'):-len('.jpg')].isdigit()]
+    return sorted(numbered, key=lambda n: int(n[len('eink-disable'):-len('.jpg')]))
 
 
 class Tooltip:
@@ -2359,7 +2360,8 @@ def _setup_logging():
     handlers = [logging.StreamHandler()]
     try:
         os.makedirs(os.path.dirname(EInkControlGUI.LOG_FILE), mode=0o700, exist_ok=True)
-        handlers.append(logging.FileHandler(EInkControlGUI.LOG_FILE, mode='w'))
+        handlers.append(logging.handlers.RotatingFileHandler(
+            EInkControlGUI.LOG_FILE, maxBytes=1_000_000, backupCount=3))
     except OSError as e:
         print(f"WARNING: cannot open log file {EInkControlGUI.LOG_FILE}: {e}", file=sys.stderr)
     logging.basicConfig(
@@ -2381,6 +2383,7 @@ def main():
             ui_preview = arg.split('=', 1)[1] or 'disconnected'
 
     logger = _setup_logging()
+    logger.info("===== Tinta4PlusU GUI starting =====")
 
     # Log uncaught exceptions instead of losing them
     def handle_exception(exc_type, exc_value, exc_traceback):
