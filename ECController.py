@@ -10,6 +10,7 @@ By downloading and using this software you agree to these terms and acknowledge 
 """
 
 import time
+import threading
 import portio
 import subprocess
 
@@ -39,6 +40,11 @@ class ECController:
     
     def __init__(self, logger):
         self.logger = logger
+        # One EC transaction (cmd + addr [+ data]) at a time. Socket client
+        # threads and the hotkey thread both reach the EC; interleaving their
+        # port writes would turn one thread's data byte into another's address.
+        # RLock because write_and_verify() nests read_byte()/write_byte().
+        self._lock = threading.RLock()
         self.access_available = False
         self.secure_boot_enabled = False
         self.error_message = None
@@ -150,8 +156,9 @@ class ECController:
         try:
             power_value = self.read_byte(self.REG_POWER)
             self.logger.debug(f"Read frontlight power: 0x{power_value:02x}")
-            # 0x06 = enabled, 0x05 = disabled (based on your readback values)
-            return power_value == 0x06
+            # 0x06/0x0A = enabled, 0x05/0x09 = disabled — the same pairs
+            # enable_frontlight()/disable_frontlight() accept as success.
+            return power_value in (0x06, 0x0A)
         except Exception as e:
             self.logger.error(f"Failed to read frontlight state: {e}")
             return None
@@ -188,6 +195,10 @@ class ECController:
     
     def read_byte(self, address):
         """Read a byte from EC RAM"""
+        with self._lock:
+            return self._read_byte_locked(address)
+
+    def _read_byte_locked(self, address):
         self._wait_ibf_clear()
         
         portio.outb(self.EC_CMD_READ, self.EC_SC_PORT)
@@ -204,6 +215,10 @@ class ECController:
     
     def write_byte(self, address, value):
         """Write a byte to EC RAM"""
+        with self._lock:
+            return self._write_byte_locked(address, value)
+
+    def _write_byte_locked(self, address, value):
         self.logger.debug(f"write_byte: address=0x{address:02x}, value=0x{value:02x}")
 
         self.logger.debug("write_byte: waiting for IBF clear (1/4)")
@@ -231,17 +246,15 @@ class ECController:
         return True
     
     def write_and_verify(self, address, value):
-        """Write byte to EC, wait 100ms, read back and return value"""
-        # Write the value
-        self.write_byte(address, value)
-        
-        # Wait 100ms as requested
-        time.sleep(0.1)
-        
-        # Read back
-        readback = self.read_byte(address)
-        
-        return readback
+        """Write byte to EC, wait 100ms, read back and return value.
+
+        Held under the lock for the whole write/settle/read cycle so another
+        thread cannot change the register between the write and the readback.
+        """
+        with self._lock:
+            self._write_byte_locked(address, value)
+            time.sleep(0.1)
+            return self._read_byte_locked(address)
     
     def set_brightness(self, level):
         """
