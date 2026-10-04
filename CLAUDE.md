@@ -10,8 +10,8 @@ This is a fork/universal version. The binary/install names use `tinta4plusu` to 
 
 Two-process model communicating via Unix socket (`/tmp/tinta4plusu.sock`):
 
-- **Tinta4Plus.py** — Unprivileged tkinter GUI. Launches the helper via `pkexec`.
-- **HelperDaemon.py** — Privileged daemon (needs root for EC port I/O and USB). Runs as a socket server.
+- **Tinta4Plus.py** — Unprivileged tkinter GUI. Launches the helper via `pkexec`. Single-instance (flock on `$XDG_RUNTIME_DIR/tinta4plusu-gui.lock`); display switches run on a worker thread, widgets are only touched on the Tk thread via `_ui()`, and all display mutations share `_display_lock`. `_eink_on` is the thread-safe mirror of the eInk state and is seeded from the daemon's `get-state` on every connect.
+- **HelperDaemon.py** — Privileged daemon (needs root for EC port I/O and USB). Runs as a socket server. Single-instance (flock on `/run/lock/tinta4plusu-helper.lock`), checks `SO_PEERCRED` on every connection (root + the launching user only), caps frames at 64 KiB / clients at 8 / idle at 90 s.
 
 ### Module map
 
@@ -24,7 +24,8 @@ Two-process model communicating via Unix socket (`/tmp/tinta4plusu.sock`):
 | `HelperClient.py` | Socket client for GUI→daemon IPC (JSON, length-prefix framing) | User |
 | `ECController.py` | Embedded Controller register access via portio (I/O ports 0x66/0x62) | Root |
 | `EInkUSBController.py` | USB T-CON controller via pyusb (VID 0x048d, PID 0x8957) | Root |
-| `WatchdogTimer.py` | 20s watchdog, triggers daemon shutdown on timeout | Root |
+| `WatchdogTimer.py` | 60s watchdog, triggers daemon shutdown when no client sends commands | Root |
+| `toggle-eink.py` | Standalone CLI display toggle (no GUI needed) | User |
 | `touch_diagnostic.py` | Standalone touchscreen mapping diagnostic tool | User |
 
 ### Hardware details
@@ -40,7 +41,7 @@ Two-process model communicating via Unix socket (`/tmp/tinta4plusu.sock`):
 Two spec files produce two independent onedir bundles:
 
 - `tinta4plusu.spec` → `dist/tinta4plusu/tinta4plusu` (GUI, console=False)
-  - Bundles: `eink-disable1.jpg`, `eink-disable2.jpg`, `eink-disable3.jpg` as data
+  - Bundles every `eink-disable<N>.jpg` present as data (globbed, not a fixed list)
   - Hidden imports: `ThemeManager`, `DisplayManager`, `HelperClient`
 - `tinta4plusu-helper.spec` → `dist/tinta4plusu-helper/tinta4plusu-helper` (daemon, console=True)
   - Hidden imports: `ECController`, `EInkUSBController`, `WatchdogTimer`
@@ -57,8 +58,8 @@ What it does:
 1. Asks user to choose install mode: compiled binary (option 1) or Python scripts (option 2)
 2. Detects desktop environment (3 fallback methods: env vars → loginctl for SUDO_USER session → process detection)
 3. Installs apt dependencies:
-   - Common: `libusb-1.0-0`, `python3-tk`
-   - Script mode adds: `python3`, `python3-usb`
+   - Common: `libusb-1.0-0`, `python3-tk`, `python3-evdev`
+   - Script mode adds: `python3`, `python3-usb`, `python3-pil` (thumbnails), `python3-dbus`, `python3-gi` (resume monitor, sleep inhibitor, Mutter)
    - GNOME/Cinnamon adds: `gnome-themes-extra`, `policykit-1-gnome` (required for pkexec password dialog)
    - KDE adds: `kscreen`, `plasma-workspace`
    - XFCE adds: `xfce4-settings`
@@ -66,7 +67,7 @@ What it does:
 5. Copies onedir bundles (binary mode) or .py files + images (script mode) to `/opt/tinta4plusu/`
 6. Creates symlinks (binary) or wrapper scripts (script) in `/usr/local/bin/`
 7. Installs `tinta4plusu.desktop` to `/usr/share/applications/`
-8. Installs `tinta4plusu-autostart.desktop` to `/etc/xdg/autostart/`
+8. Removes any `/etc/xdg/autostart/tinta4plusu-autostart.desktop` left by earlier versions — the app is deliberately not autostarted, so opening it always goes with the helper's admin password prompt
 9. Optionally installs PolicyKit policy (`org.tinta4plusu.helper.policy`) for `auth_admin_keep` (user chooses at install time)
 10. Verifies dependencies and warns about any missing ones
 
@@ -96,40 +97,65 @@ Uses `sys.frozen` to detect PyInstaller mode and resolve `base_dir` accordingly 
 - If helper is a binary → `pkexec <path>` (no python3 prefix)
 - Requires `policykit-1-gnome` on GNOME/Cinnamon for the password dialog agent
 
+### T-CON availability and USB access (`HelperDaemon._eink_op()`)
+
+- The daemon starts even if the T-CON USB device is missing (EC-only mode: frontlight works, eInk commands return "E-Ink T-CON not available").
+- Every T-CON operation goes through `_eink_op()`, which holds `_usb_lock` (socket clients, the hotkey thread and the HTTP API all reach the device) and calls `EInkUSBController.ensure_connected()` first.
+- `ensure_connected()` reconnects only when there is no handle or the device re-enumerated (bus/address changed, typically after suspend). It never issues a USB reset: a reset makes the T-CON show its boot splash.
+- The GUI sends `reconnect-usb` after resume; any later eInk command would also trigger the reconnect.
+
 ### Privacy images
 
-When the eInk is disabled, the app switches to dynamic mode first, then displays a random image from `EINK_DISABLED_IMAGES` fullscreen before powering off the T-CON. This clears any sensitive content from the eInk.
+When the eInk is disabled, the app switches to dynamic mode first, then displays a privacy image fullscreen before powering off the T-CON. This clears any sensitive content from the eInk.
+
+Images are discovered at startup (`discover_privacy_images()`: every `eink-disable<N>.jpg` next to the code), so adding or removing a file is enough — no list to edit. Shipped in git:
 
 - `eink-disable1.jpg` — "AIME-TOI COMME TU ES!" (teal)
 - `eink-disable2.jpg` — "La vie est belle!" (purple)
 - `eink-disable3.jpg` — "Vive l'amour." (teal)
 
-All 2560x1600, matching the eInk panel resolution exactly. The original `eink-disable.jpg` (Tux penguin) is no longer referenced by code but still in the repo.
+Personal images (e.g. a local `eink-disable4.jpg`) are git-ignored and stay on the machine. All 2560x1600, matching the eInk panel resolution exactly. The original `eink-disable.jpg` (Tux penguin) is the README illustration, not a privacy image.
+
+The GUI exposes a "Privacy image" dropdown (under Display Control) that lets the user pin a specific filename instead of the default random pick. Stored in settings as `privacy_image` (`'random'` or one of the filenames); `toggle-eink.py` honors the same setting.
 
 Image resolution in frozen mode uses `sys._MEIPASS` (PyInstaller `_internal/` directory).
 
 ### Keyboard shortcuts
 
-- **Help** (Fn+F9): Refresh eInk (clear ghosts)
-- **XF86MonBrightnessUp** (Fn+F6): Increase frontlight brightness
-- **XF86MonBrightnessDown** (Fn+F5): Decrease frontlight brightness
+- **Super+P** (Fn+F7): Toggle eInk/OLED — always active when daemon is running. The listener grabs the keyboard device so the DE's display projection dialog is suppressed. 2-second debounce prevents rapid fire.
+- **Help** (Fn+F9): Refresh eInk (clear ghosts) — only when eInk enabled
+- **XF86MonBrightnessUp** (Fn+F6): Increase frontlight brightness — only when eInk enabled
+- **XF86MonBrightnessDown** (Fn+F5): Decrease frontlight brightness — only when eInk enabled
 
-These work both in the tkinter GUI (`bind_all`) and globally via `GlobalHotkeyListener` (evdev, runs in the helper daemon as root). Only active when eInk is enabled.
+These work both in the tkinter GUI (`bind_all`) and globally via `GlobalHotkeyListener` (evdev, runs in the helper daemon as root). The listener holds Super back until it knows whether P follows; any other key (or a Super auto-repeat) first injects the pending Super-down so Super+L / Super+Tab / Super+drag reach the desktop intact. Brightness/Help keys are only swallowed when the daemon callback returns True (eInk on); otherwise they pass through to the desktop. Callbacks' hardware work runs on a worker thread (`run_async`) so key forwarding never stalls. Its own `tinta4plusu-fwd-*` UInput mirrors are skipped when scanning devices.
 
 ### OLED wake sequence
 
-When switching back to OLED, the app forces DPMS on (`xset dpms force on`), unlocks the session via D-Bus (`org.gnome.ScreenSaver` / `org.freedesktop.ScreenSaver`), and logs activity to the GUI.
+When switching back to OLED, the app forces DPMS on (`xset dpms force on`; on Wayland deactivates `org.gnome.ScreenSaver` and `loginctl activate`s its own session). It deliberately never calls `loginctl unlock-session`: Super+P is handled by a root evdev listener and therefore fires from the lock screen, so unlocking here would bypass the lock screen.
+
+### Black-screen guards
+
+`DisplayManager.disable_display()` refuses to turn off the only active output. The enable sequence rolls back (eInk output off, theme restored) if eDP-2 or the T-CON cannot be enabled; the disable sequence always re-enables the OLED even when the T-CON step fails. The sleep inhibitor is released in a `finally`. Closing the GUI while eInk is active switches back to OLED first.
+
+### GUI design notes
+
+- sv_ttk dark theme. Text size (Settings → Normal/Large/Larger, default Large = 1.2×) is applied by rescaling sv_ttk's named fonts (`SunValley*Font`, pixel sizes) in `_apply_text_size()`; our own fonts derive from `SunValleyBodyFont` — never from `TkDefaultFont`, which Tk scales independently and renders much larger. Use `Card.TFrame`, `Accent.TButton`, `Toggle.TButton`, `Switch.TCheckbutton`.
+- Layout: header with status chips → "Active display" card (one big accent button, countdown shown in the button, Esc cancels) → "eInk" card (mode toggles, refresh, frontlight −/slider/+, auto-refresh) → Notebook (Settings | Activity) → footer status line.
+- `python3 Tinta4Plus.py --ui-preview[=connected|eink][:settings|activity]` renders the UI with hardware, helper and monitors disabled.
 
 ## File inventory
 
 ### Source (tracked in git)
 - `Tinta4Plus.py`, `HelperDaemon.py`, `DisplayManager.py`, `ThemeManager.py`, `HelperClient.py`, `ECController.py`, `EInkUSBController.py`, `WatchdogTimer.py`
+- `toggle-eink.py` (standalone CLI display toggle)
 - `touch_diagnostic.py` (standalone touchscreen mapping diagnostic)
-- `eink-disable1.jpg`, `eink-disable2.jpg`, `eink-disable3.jpg` (privacy images)
-- `eink-disable.jpg` (original, unused by code)
+- `eink-disable1.jpg`, `eink-disable2.jpg`, `eink-disable3.jpg` (privacy images; further `eink-disable<N>.jpg` files are local-only, see .gitignore)
+- `eink-disable.jpg` (README illustration, unused by code)
 - `tinta4plusu.spec`, `tinta4plusu-helper.spec`
 - `build.sh`, `installer.sh`
-- `tinta4plusu.desktop`, `tinta4plusu-autostart.desktop`
+- `tinta4plusu.desktop`
+- `tinta4plusu-autostart.desktop` (no longer installed; kept for manual use with `--autostart`)
+- `tcon-protocol.md` (T-CON USB protocol notes from Windows captures)
 - `org.tinta4plusu.helper.policy`
 
 ### Generated (in .gitignore)
@@ -140,7 +166,9 @@ When switching back to OLED, the app forces DPMS on (`xset dpms force on`), unlo
 - The project does not use a virtualenv — system Python 3.12.3 with system packages
 - Dependencies: `python3-tk`, `pyusb`, `portio`, `sv-ttk`, `libusb-1.0-0`, `policykit-1-gnome` (GNOME/Cinnamon)
 - GUI uses sv-ttk dark theme
-- Logging goes to `/tmp/tinta4plusu.log` (overwrite mode) + console
-- Socket path: `/tmp/tinta4plusu.sock`
-- Config dir: `~/.config/Tinta4PlusU`
+- GUI log: `~/.cache/Tinta4PlusU/gui.log` (overwrite mode) + console. Helper log: `/var/log/tinta4plusu-helper.log` (0644). Nothing is written to predictable `/tmp` paths except the socket.
+- Socket path: `/tmp/tinta4plusu.sock` (0600, owned by the launching user; peer-cred checked). Daemon lock/pid: `/run/lock/tinta4plusu-helper.lock`, `/run/tinta4plusu-helper.pid`.
+- Config dir: `~/.config/Tinta4PlusU` (`settings` JSON keys: display_scale, refresh_period, autoswitch_theme, flip_countdown, privacy_image, floating_button, text_size)
+- `HelperClient.disconnect(shutdown_helper=...)`: only the process that launched the daemon passes True.
+- `ECController` serialises every EC transaction with an RLock; `EInkUSBController` access is serialised by the daemon's `_usb_lock`.
 - Commit messages: imperative mood, concise summary line, details in body if needed

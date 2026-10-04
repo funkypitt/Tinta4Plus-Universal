@@ -57,6 +57,7 @@ do_uninstall() {
 
     rm -f  "${BIN_DIR}/tinta4plusu"
     rm -f  "${BIN_DIR}/tinta4plusu-helper"
+    rm -f  "${BIN_DIR}/toggle-eink"
     rm -rf "${INSTALL_DIR}"
     rm -f  "${DESKTOP_DIR}/tinta4plusu.desktop"
     rm -f  "${AUTOSTART_DIR}/tinta4plusu-autostart.desktop"
@@ -198,8 +199,9 @@ install_deps() {
     local pkgs="libusb-1.0-0"
 
     # Python scripts need the full Python stack
+    # python3-pil: privacy-image thumbnails in the GUI (optional at runtime)
     if [ "$INSTALL_MODE" = "script" ]; then
-        pkgs="$pkgs python3 python3-tk python3-usb python3-evdev"
+        pkgs="$pkgs python3 python3-tk python3-usb python3-evdev python3-pil python3-dbus python3-gi"
     else
         pkgs="$pkgs python3-tk python3-evdev"
     fi
@@ -318,6 +320,21 @@ install_binary() {
     ln -sf "${INSTALL_DIR}/tinta4plusu/tinta4plusu"              "${BIN_DIR}/tinta4plusu"
     ln -sf "${INSTALL_DIR}/tinta4plusu-helper/tinta4plusu-helper" "${BIN_DIR}/tinta4plusu-helper"
 
+    # Install toggle-eink CLI tool (Python script, works with both install modes)
+    if [ -f "${SCRIPT_DIR}/toggle-eink.py" ]; then
+        cp "${SCRIPT_DIR}/toggle-eink.py" "${INSTALL_DIR}/"
+        # Also copy dependencies it needs (HelperClient, DisplayManager)
+        for dep in HelperClient.py DisplayManager.py; do
+            [ -f "${SCRIPT_DIR}/${dep}" ] && cp "${SCRIPT_DIR}/${dep}" "${INSTALL_DIR}/"
+        done
+        cat > "${BIN_DIR}/toggle-eink" << 'WRAPPER'
+#!/bin/bash
+exec python3 /opt/tinta4plusu/toggle-eink.py "$@"
+WRAPPER
+        chmod 755 "${BIN_DIR}/toggle-eink"
+        info "toggle-eink CLI tool installed."
+    fi
+
     # Verify binaries are executable
     if [ ! -x "${BIN_DIR}/tinta4plusu" ]; then
         error "GUI binary symlink is not executable: ${BIN_DIR}/tinta4plusu"
@@ -350,6 +367,7 @@ install_script() {
         EInkUSBController.py
         WatchdogTimer.py
         GlobalHotkeyListener.py
+        toggle-eink.py
     )
 
     local copy_failed=false
@@ -401,6 +419,12 @@ exec python3 /opt/tinta4plusu/HelperDaemon.py "$@"
 WRAPPER
     chmod 755 "${BIN_DIR}/tinta4plusu-helper"
 
+    cat > "${BIN_DIR}/toggle-eink" << 'WRAPPER'
+#!/bin/bash
+exec python3 /opt/tinta4plusu/toggle-eink.py "$@"
+WRAPPER
+    chmod 755 "${BIN_DIR}/toggle-eink"
+
     info "Python scripts installed."
 }
 
@@ -410,7 +434,10 @@ install_desktop() {
     step "Installing desktop entries"
 
     cp "${SCRIPT_DIR}/tinta4plusu.desktop"           "${DESKTOP_DIR}/"
-    cp "${SCRIPT_DIR}/tinta4plusu-autostart.desktop"  "${AUTOSTART_DIR}/"
+    # No login autostart: the app is always opened by the user, so opening it
+    # always goes with the helper's admin password prompt. Remove the entry
+    # left by earlier versions.
+    rm -f "${AUTOSTART_DIR}/tinta4plusu-autostart.desktop"
 
     # Validate desktop files if desktop-file-validate is available
     if command -v desktop-file-validate &>/dev/null; then
@@ -484,8 +511,11 @@ main() {
     info " Installation complete! (mode: ${INSTALL_MODE})"
     info ""
     info " Launch from terminal:  tinta4plusu"
+    info " Toggle eInk/OLED:     toggle-eink"
     info " Or find 'Tinta4PlusU' in your application menu."
-    info " It will also autostart on next login."
+    info ""
+    info " Super+P (Fn+F7) toggles displays when the"
+    info " daemon is running."
     info ""
     info " To uninstall:  sudo bash installer.sh --uninstall"
     info " Install log:   ${LOG_FILE}"

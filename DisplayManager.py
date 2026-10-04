@@ -117,7 +117,17 @@ class DisplayManager:
         return self._enable_display_x11(display_name, scale)
 
     def disable_display(self, display_name):
-        """Disable/turn off a display."""
+        """Disable/turn off a display.
+
+        Refuses to turn off the only active output: that would leave the
+        user with every panel dark and no way to recover from the GUI.
+        Mutter already enforces this on Wayland; X11 and KDE do not.
+        """
+        others = [c for c in (self.OLED_CONNECTOR, self.EINK_CONNECTOR) if c != display_name]
+        if not any(self.is_display_active(c) for c in others):
+            self.logger.error(
+                f"Refusing to disable {display_name}: it is the only active output")
+            return False
         if self._use_kde_wayland():
             return self._disable_display_kde(display_name)
         if self._use_mutter_wayland():
@@ -193,10 +203,12 @@ class DisplayManager:
 
         On X11 this uses ``xset dpms force on``.
         On Wayland it deactivates the GNOME screensaver, unlocks the
-        session, and activates it via loginctl.
+        session, and re-activates our own session via loginctl.
 
-        Disabling eDP-2 can cause GNOME to lock the session (as if
-        the lid was closed), so we must both unlock and activate.
+        Disabling eDP-2 can cause GNOME to blank/switch away from the
+        session (as if the lid was closed); waking the panel and
+        activating the session brings it back. Unlocking is never done
+        here (see below).
         """
         if self.session_type != 'wayland':
             # X11 path
@@ -221,22 +233,19 @@ class DisplayManager:
         except Exception as e:
             self.logger.warning(f"Wayland: GNOME ScreenSaver D-Bus failed: {e}")
 
-        # 2. Unlock and activate all login sessions — disabling a display
-        #    can trigger GNOME to lock the session, producing a black screen
-        #    that only flashes content briefly when the lid moves.
-        try:
-            result = subprocess.run(['loginctl', 'show-user', os.environ.get('USER', ''),
-                                     '--property=Sessions', '--value'],
-                                    capture_output=True, text=True, timeout=5)
-            sessions = result.stdout.strip().split()
-            for session in sessions:
-                subprocess.run(['loginctl', 'unlock-session', session],
+        # 2. Re-activate *our own* session in case the display change
+        #    switched the VT. We deliberately do NOT call
+        #    `loginctl unlock-session`: the toggle can be triggered from the
+        #    lock screen via Super+P (the hotkey listener runs as root), and
+        #    unlocking from there would bypass the lock screen entirely.
+        session_id = os.environ.get('XDG_SESSION_ID')
+        if session_id:
+            try:
+                subprocess.run(['loginctl', 'activate', session_id],
                                capture_output=True, timeout=5)
-                subprocess.run(['loginctl', 'activate', session],
-                               capture_output=True, timeout=5)
-            self.logger.info("Wayland: unlocked and activated session via loginctl")
-        except Exception as e:
-            self.logger.warning(f"Wayland: loginctl unlock/activate failed: {e}")
+                self.logger.info(f"Wayland: activated session {session_id}")
+            except Exception as e:
+                self.logger.warning(f"Wayland: loginctl activate failed: {e}")
 
     def get_display_geometry(self, display_name):
         """Get the geometry (position and size) of a display."""
@@ -310,8 +319,8 @@ class DisplayManager:
             )
 
             for line in result.stdout.split('\n'):
-                if display_name in line and ' connected' in line:
-                    parts = line.split()
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == display_name and parts[1] == 'connected':
                     for part in parts:
                         if 'x' in part and '+' in part:
                             return True
@@ -323,45 +332,101 @@ class DisplayManager:
             self.logger.error(f"Failed to check display status: {e}")
             return False
 
+    def _apply_xrandr_enable(self, display_name, scale=None):
+        """Build and run the xrandr command to enable a display. Returns (cmd, success)."""
+        if display_name == "eDP-1":
+            native_width, native_height = self.OLED_RESOLUTION_WH
+        elif display_name == "eDP-2":
+            native_width, native_height = self.EINK_RESOLUTION_WH
+        else:
+            self.logger.warning(f"Unknown display {display_name}, using auto mode")
+            native_width, native_height = None, None
+
+        cmd = ['xrandr', '--output', display_name]
+
+        if native_width and native_height:
+            cmd.extend(['--mode', f'{native_width}x{native_height}'])
+            cmd.extend(['--pos', '0x0'])
+
+            if scale is not None and scale != 1.0:
+                scale_inv = 1.0 / scale
+                panning_width = int(native_width * scale_inv)
+                panning_height = int(native_height * scale_inv)
+                cmd.extend(['--panning', f'{panning_width}x{panning_height}'])
+                cmd.extend(['--scale', f'{scale_inv}x{scale_inv}'])
+                self.logger.info(f"Scaling: virtual desktop {panning_width}x{panning_height}, "
+                               f"xrandr scale {scale_inv:.3f}x{scale_inv:.3f} (our scale={scale}), "
+                               f"physical {native_width}x{native_height}")
+            else:
+                cmd.extend(['--panning', f'{native_width}x{native_height}'])
+                cmd.extend(['--scale', '1x1'])
+        else:
+            cmd.extend(['--auto', '--pos', '0x0'])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            self.logger.warning(f"xrandr returned {result.returncode}: {result.stderr.strip()}")
+
+        return result.returncode == 0
+
+    def _expected_x11_size(self, display_name, scale=None):
+        """Size xrandr should report for a display enabled by _apply_xrandr_enable."""
+        if display_name == self.OLED_CONNECTOR:
+            native_w, native_h = self.OLED_RESOLUTION_WH
+        elif display_name == self.EINK_CONNECTOR:
+            native_w, native_h = self.EINK_RESOLUTION_WH
+        else:
+            return None
+        if scale is not None and scale != 1.0:
+            # Same arithmetic as the --panning argument we pass to xrandr
+            scale_inv = 1.0 / scale
+            return int(native_w * scale_inv), int(native_h * scale_inv)
+        return native_w, native_h
+
+    def _verify_display_state_x11(self, display_name, expect_active, scale=None):
+        """Verify that a display matches the expected active/inactive state.
+
+        Returns True if the actual state matches expectations, False otherwise.
+        When active, also checks that the reported size matches what we asked
+        for (native size, or the scaled/panned size when ``scale`` != 1).
+        """
+        is_active = self._is_display_active_x11(display_name)
+        if is_active != expect_active:
+            self.logger.warning(f"Display state mismatch: {display_name} "
+                              f"expected {'active' if expect_active else 'inactive'}, "
+                              f"got {'active' if is_active else 'inactive'}")
+            return False
+
+        if expect_active:
+            geometry = self._get_display_geometry_x11(display_name)
+            expected = self._expected_x11_size(display_name, scale)
+            if geometry and expected:
+                expected_w, expected_h = expected
+                actual_w, actual_h = geometry['width'], geometry['height']
+                # Allow a pixel of rounding slack on scaled sizes
+                if abs(actual_w - expected_w) > 2 or abs(actual_h - expected_h) > 2:
+                    self.logger.warning(f"Resolution mismatch on {display_name}: "
+                                      f"expected {expected_w}x{expected_h}, "
+                                      f"got {actual_w}x{actual_h}")
+                    return False
+
+        return True
+
+    def _reset_display_to_native_baseline(self, display_name):
+        """Reset a display to native resolution at 1.0 scale before retrying."""
+        self.logger.info(f"Resetting {display_name} to native baseline before retry")
+        try:
+            subprocess.run(
+                ['xrandr', '--output', display_name, '--off'],
+                capture_output=True, timeout=5)
+            time.sleep(0.3)
+        except Exception as e:
+            self.logger.warning(f"Reset to baseline failed: {e}")
+
     def _enable_display_x11(self, display_name, scale=None):
         """Enable a display using xrandr with optional scaling."""
         try:
-            if display_name == "eDP-1":
-                native_width, native_height = self.OLED_RESOLUTION_WH
-            elif display_name == "eDP-2":
-                native_width, native_height = self.EINK_RESOLUTION_WH
-            else:
-                self.logger.warning(f"Unknown display {display_name}, using auto mode")
-                native_width, native_height = None, None
-
-            cmd = ['xrandr', '--output', display_name]
-
-            if native_width and native_height:
-                cmd.extend(['--mode', f'{native_width}x{native_height}'])
-                # Explicit position at origin — without --pos xrandr may
-                # place the display beside the other output, creating an
-                # invisible extended desktop where the pointer can roam
-                # but clicks don't hit any visible window.
-                cmd.extend(['--pos', '0x0'])
-
-                if scale is not None and scale != 1.0:
-                    scale_inv = 1.0 / scale
-                    panning_width = int(native_width * scale_inv)
-                    panning_height = int(native_height * scale_inv)
-                    cmd.extend(['--panning', f'{panning_width}x{panning_height}'])
-                    cmd.extend(['--scale', f'{scale_inv}x{scale_inv}'])
-                    self.logger.info(f"Scaling: virtual desktop {panning_width}x{panning_height}, "
-                                   f"xrandr scale {scale_inv:.3f}x{scale_inv:.3f} (our scale={scale}), "
-                                   f"physical {native_width}x{native_height}")
-                else:
-                    cmd.extend(['--panning', f'{native_width}x{native_height}'])
-                    cmd.extend(['--scale', '1x1'])
-            else:
-                cmd.extend(['--auto', '--pos', '0x0'])
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-            if result.returncode != 0:
-                self.logger.warning(f"xrandr returned {result.returncode}: {result.stderr.strip()}")
+            self._apply_xrandr_enable(display_name, scale)
 
             time.sleep(0.5)
 
@@ -375,12 +440,30 @@ class DisplayManager:
 
             time.sleep(0.3)
 
-            if self._is_display_active_x11(display_name):
+            # Verify the display state matches expectations
+            if self._verify_display_state_x11(display_name, expect_active=True, scale=scale):
                 scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
                 self.logger.info(f"Enabled display: {display_name}{scale_info}")
                 return True
+
+            # Verification failed — reset to baseline and retry once
+            self.logger.warning(f"Display verification failed for {display_name}, retrying...")
+            self._reset_display_to_native_baseline(display_name)
+            self._apply_xrandr_enable(display_name, scale)
+            time.sleep(0.8)
+
+            try:
+                subprocess.run(['xset', 'dpms', 'force', 'on'],
+                               capture_output=True, timeout=5)
+            except Exception:
+                pass
+
+            if self._is_display_active_x11(display_name):
+                scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
+                self.logger.info(f"Enabled display (after retry): {display_name}{scale_info}")
+                return True
             else:
-                self.logger.error(f"Failed to enable display: {display_name} (display not active after command)")
+                self.logger.error(f"Failed to enable display: {display_name} (display not active after retry)")
                 return False
 
         except Exception as e:
@@ -398,11 +481,24 @@ class DisplayManager:
 
             time.sleep(0.2)
 
-            if not self._is_display_active_x11(display_name):
+            if self._verify_display_state_x11(display_name, expect_active=False):
                 self.logger.info(f"Disabled display: {display_name}")
                 return True
+
+            # Retry once
+            self.logger.warning(f"Display {display_name} still active after disable, retrying...")
+            subprocess.run(
+                ['xrandr', '--output', display_name, '--off'],
+                capture_output=True,
+                timeout=5
+            )
+            time.sleep(0.5)
+
+            if not self._is_display_active_x11(display_name):
+                self.logger.info(f"Disabled display (after retry): {display_name}")
+                return True
             else:
-                self.logger.error(f"Failed to disable display: {display_name} (display still active after command)")
+                self.logger.error(f"Failed to disable display: {display_name} (still active after retry)")
                 return False
 
         except Exception as e:
@@ -420,8 +516,8 @@ class DisplayManager:
             )
 
             for line in result.stdout.split('\n'):
-                if display_name in line and 'connected' in line:
-                    parts = line.split()
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == display_name and parts[1] == 'connected':
                     for part in parts:
                         if 'x' in part and '+' in part:
                             geo = part.split('+')
@@ -459,6 +555,9 @@ class DisplayManager:
                 self.logger.info("Displaying fullscreen image using feh")
                 process = subprocess.Popen(cmd)
                 time.sleep(0.5)
+                if process.poll() is not None:
+                    self.logger.error(f"feh exited immediately (code {process.returncode})")
+                    return None
                 return process
             except Exception as e:
                 self.logger.error(f"Failed to display image with feh: {e}")
@@ -470,6 +569,9 @@ class DisplayManager:
                 self.logger.warning("imv may not position on correct display automatically")
                 process = subprocess.Popen(cmd)
                 time.sleep(0.5)
+                if process.poll() is not None:
+                    self.logger.error(f"imv exited immediately (code {process.returncode})")
+                    return None
                 return process
             except Exception as e:
                 self.logger.error(f"Failed to display image with imv: {e}")
@@ -1089,6 +1191,9 @@ except Exception as e:
                 self.logger.warning("imv may not position on correct display automatically")
                 process = subprocess.Popen(cmd)
                 time.sleep(0.5)
+                if process.poll() is not None:
+                    self.logger.error(f"imv exited immediately (code {process.returncode})")
+                    return None
                 return process
             except Exception as e:
                 self.logger.error(f"Failed to display image with imv: {e}")
