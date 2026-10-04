@@ -120,6 +120,7 @@ class EInkUSBController:
             
         except Exception as e:
             self.logger.error(f"Failed to connect to USB device: {e}")
+            self._drop_handle()
             raise
     
     def disconnect(self):
@@ -132,6 +133,38 @@ class EInkUSBController:
                 self.logger.info("Disconnected from E-Ink device")
             except Exception as e:
                 self.logger.warning(f"Error during USB disconnect: {e}")
+            finally:
+                self._drop_handle()
+
+    def _drop_handle(self):
+        """Forget the current device handle without talking to the device"""
+        if self.dev is not None:
+            try:
+                usb.util.dispose_resources(self.dev)
+            except Exception:
+                pass
+            self.dev = None
+
+    def ensure_connected(self):
+        """Connect if there is no handle, or if the handle went stale.
+
+        After suspend/lid close the T-CON can re-enumerate with a new USB
+        address, leaving self.dev pointing at a device that no longer exists.
+        A handle whose bus/address still matches the device is left alone.
+        No USB reset is issued: that makes the T-CON show its boot splash.
+
+        Returns True if a new connection was made, False if the existing one
+        is still valid. Raises if the device cannot be found or claimed.
+        """
+        if self.dev is not None:
+            current = usb.core.find(idVendor=self.VID, idProduct=self.PID)
+            if (current is not None and current.bus == self.dev.bus
+                    and current.address == self.dev.address):
+                return False
+            self.logger.info("E-Ink USB handle is stale, reconnecting")
+            self._drop_handle()
+        self.connect()
+        return True
     
     def _send_payload(self, payload):
         """Send a single payload command via USB bulk transfer"""

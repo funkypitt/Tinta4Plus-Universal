@@ -4,6 +4,7 @@ PyInstaller spec for Tinta4PlusU GUI
 Produces: dist/tinta4plusu/tinta4plusu
 """
 
+import glob
 from PyInstaller.utils.hooks import collect_data_files
 
 # sv_ttk ships TCL/TK theme files that must be bundled
@@ -17,10 +18,9 @@ a = Analysis(
     ['Tinta4Plus.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('eink-disable1.jpg', '.'),
-        ('eink-disable2.jpg', '.'),
-        ('eink-disable3.jpg', '.'),
+    # Privacy images are discovered at runtime (eink-disable<N>.jpg), so
+    # bundle whatever is present rather than a fixed list.
+    datas=[(img, '.') for img in sorted(glob.glob('eink-disable[0-9]*.jpg'))] + [
         ('README_EULA_INSTRUCTIONS_WARNINGS.txt', '.'),
     ] + sv_ttk_datas,
     hiddenimports=[
