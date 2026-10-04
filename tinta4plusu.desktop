@@ -5,5 +5,6 @@ Exec=/usr/local/bin/tinta4plusu
 Icon=preferences-desktop-display
 Terminal=false
 Type=Application
+StartupWMClass=tinta4plusu
 Categories=Settings;HardwareSettings;
 Keywords=eink;display;thinkbook;
