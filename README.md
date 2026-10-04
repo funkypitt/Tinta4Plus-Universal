@@ -128,6 +128,12 @@ eInk panels accumulate ghosting (afterimages) from partial updates. You can clea
 - **Refresh button**: click **⟳ Refresh** in the eInk card (or the floating ⟳ button that appears on the left edge while eInk is active — it can be dragged anywhere, and switched off in Settings).
 - **Auto-refresh**: the slider runs a full refresh every 5–60 seconds (off by default).
 
+### Privacy images
+
+When the eInk is switched off it keeps its last frame, so the app first shows a full-screen privacy image. Pick one in **Settings → Privacy image** (with a thumbnail) or leave it on *Random*. Sixteen ship with the app: three text cards and thirteen geometric/abstract designs whose colour themes come from the [Plume keyboard](https://github.com/funkypitt/clavier-plume) presets — Plume light/dark, Catppuccin Mocha, Emerald, Sunflower, Deep Sea light/dark, Snowfall, Steel Grey, Cotton Candy, AMOLED Purple, High-Contrast Yellow and Aurora.
+
+Images are discovered at startup: any `eink-disable<N>.jpg` (2560×1600) next to the app is offered, so drop your own file in `/opt/tinta4plusu/` to add one. The generated set is reproducible with `python3 tools/generate_privacy_images.py`.
+
 ### Frontlight
 
 Use the frontlight slider or the − / + buttons (0-8) to control the eInk frontlight. The frontlight turns on automatically when switching to eInk and off when switching back to OLED. Setting brightness to **0 fully disables the frontlight** (rather than setting PWM to 0, which can produce a faint glow on some panels). Moving brightness back to any non-zero value re-enables it.

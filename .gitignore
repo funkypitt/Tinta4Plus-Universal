@@ -205,6 +205,5 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Personal privacy images (eink-disable1..3 ship with the repo)
+# Personal privacy image kept out of the public repo (all other eink-disable<N>.jpg ship)
 eink-disable4.jpg
-eink-disable[5-9].jpg
