@@ -146,6 +146,10 @@ Leaving (`_leave_reader_sequence`, also what Super+P / the window close do while
 
 Lid events come from UPower `PropertiesChanged(LidIsClosed)` on the resume-monitor D-Bus thread (`/proc/acpi/button/lid` in the poll fallback): closed → `_reassert_reader_layout()` 2.5 s later (Mutter treats both eDP outputs as laptop panels and may reconfigure on lid close); opened → `reader_off` if `reader_lid_open_exits`. `ResumeCheck.run(eink_rotation=...)` keeps the rotation across suspend. Hotkey: Super+Shift+P → daemon notification `{'type': 'reader'}`.
 
+### eInk Reader (git submodule `reader/`)
+
+The Lector fork lives in its own repository (https://github.com/funkypitt/eink-reader) and is vendored here as a submodule so one clone/installer gives the whole setup. `installer.sh` offers to run `reader/installer.sh`. Reader mode launches `eink-reader --fullscreen` (`_launch_reader_app`, setting `reader_open_app`) after the layout is applied; the reader has Kindle-style touch navigation (edge taps / swipes, centre double-tap = fullscreen). Bump the submodule pointer after pushing reader changes: `git submodule update --remote reader && git commit -am "Update reader"`.
+
 ### Top-bar indicator and D-Bus control
 
 `Indicator.py` (GTK3 + AyatanaAppIndicator3, separate process, `tinta4plusu-indicator`) owns the session name `org.tinta4plusu.Indicator` and polls the GUI every 2 s. The GUI exports `org.tinta4plusu.Gui` at `/org/tinta4plusu/Gui` (`_make_dbus_service`, created on the resume-monitor thread that runs the GLib loop; handlers hop to Tk via `_ui()`): `GetState`, `Toggle`, `ReaderMode`, `Refresh`, `SetMode(s)`, `SetBrightness(i)`, `Connect`, `Show`, `Hide`, `Quit`. Gotcha: `dbus.service.Object.__init__` overwrites `self._name`, so the `BusName` must be passed to it / kept under another attribute or the name is released by GC. The GUI starts the indicator (`_ensure_indicator`, setting `indicator`), hides instead of quitting on window close while an indicator runs (`close_to_indicator`; Ctrl+Q quits), and a second `tinta4plusu` launch asks the running one to `Show()`. `--hidden` starts withdrawn (used by the indicator's login autostart `tinta4plusu-indicator.desktop`, which the installer offers to put in `/etc/xdg/autostart`). Icons: `icons/tinta4plusu-{off,oled,eink,reader}-symbolic.svg` (recoloured by the panel because of the `-symbolic` suffix).
@@ -186,7 +190,7 @@ Lid events come from UPower `PropertiesChanged(LidIsClosed)` on the resume-monit
 - GUI uses sv-ttk dark theme
 - GUI log: `~/.cache/Tinta4PlusU/gui.log` (rotating, 1 MB × 3) + console. Helper log: `/var/log/tinta4plusu-helper.log` (0644). Nothing is written to predictable `/tmp` paths except the socket.
 - Socket path: `/tmp/tinta4plusu.sock` (0600, owned by the launching user; peer-cred checked). Daemon lock/pid: `/run/lock/tinta4plusu-helper.lock`, `/run/tinta4plusu-helper.pid`.
-- Config dir: `~/.config/Tinta4PlusU` (`settings` JSON keys: display_scale, refresh_period, autoswitch_theme, flip_countdown, privacy_image, floating_button, text_size, reader_rotation, reader_lid_open_exits, reader_active, reader_backup, indicator, close_to_indicator)
+- Config dir: `~/.config/Tinta4PlusU` (`settings` JSON keys: display_scale, refresh_period, autoswitch_theme, flip_countdown, privacy_image, floating_button, text_size, reader_rotation, reader_lid_open_exits, reader_active, reader_backup, indicator, close_to_indicator, reader_open_app)
 - `HelperClient.disconnect(shutdown_helper=...)`: only the process that launched the daemon passes True.
 - `ECController` serialises every EC transaction with an RLock; `EInkUSBController` access is serialised by the daemon's `_usb_lock`.
 - Commit messages: imperative mood, concise summary line, details in body if needed

@@ -486,6 +486,32 @@ install_desktop() {
     info "Desktop entries installed."
 }
 
+# ─── eInk Reader (optional, git submodule ./reader) ─────────────────────────
+
+install_reader() {
+    local reader_dir="${SCRIPT_DIR}/reader"
+    echo ""
+    echo -e "${CYAN}─── eInk Reader ───${NC}"
+    if [ ! -f "${reader_dir}/installer.sh" ]; then
+        info "Reader sources not present (run 'git submodule update --init' to fetch them)."
+        info "Skipping the eInk Reader; install it later from https://github.com/funkypitt/eink-reader"
+        return
+    fi
+    echo "Install the eInk Reader (Lector fork with touch navigation)?"
+    echo "Tablet reader mode opens it fullscreen when it is installed."
+    read -rp "Install eInk Reader? [Y/n] " answer
+    if [[ "$answer" =~ ^[Nn]$ ]]; then
+        info "Skipping the eInk Reader."
+        return
+    fi
+    step "Installing eInk Reader"
+    if bash "${reader_dir}/installer.sh"; then
+        info "eInk Reader installed (eink-reader)."
+    else
+        warn "eInk Reader installer failed — see /tmp/eink-reader-install.log"
+    fi
+}
+
 # ─── PolicyKit (optional) ───────────────────────────────────────────────────
 
 install_polkit() {
@@ -538,6 +564,7 @@ main() {
 
     install_desktop
     install_polkit
+    install_reader
     check_deps
 
     echo ""
@@ -546,6 +573,7 @@ main() {
     info ""
     info " Launch from terminal:  tinta4plusu"
     info " Top-bar indicator:    tinta4plusu-indicator"
+    info " eInk Reader:          eink-reader (if installed)"
     info " Toggle eInk/OLED:     toggle-eink"
     info " Or find 'Tinta4PlusU' in your application menu."
     info ""

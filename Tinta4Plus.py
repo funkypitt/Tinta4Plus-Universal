@@ -407,7 +407,9 @@ class EInkControlGUI:
         'reader_backup': None,           # gsettings values to restore after reader mode
         'indicator': True,               # start the top-bar indicator with the GUI
         'close_to_indicator': True,      # window close hides when the indicator runs
+        'reader_open_app': True,         # tablet reader mode launches eink-reader fullscreen
     }
+    READER_APP = 'eink-reader'
 
     def __init__(self, root, HELPER_SCRIPT, logger, autostart=False, ui_preview=False, start_hidden=False):
         self.HELPER_SCRIPT = HELPER_SCRIPT
@@ -498,6 +500,7 @@ class EInkControlGUI:
         self._reader_backup = settings['reader_backup'] if isinstance(settings['reader_backup'], dict) else None
         self._indicator_enabled = bool(settings['indicator'])
         self._close_to_indicator = bool(settings['close_to_indicator'])
+        self._reader_open_app = bool(settings['reader_open_app'])
 
         # Build UI
         self._thumbnail_cache = {}
@@ -515,6 +518,7 @@ class EInkControlGUI:
         self.reader_lid_var.set(self._reader_lid_open_exits)
         self.indicator_var.set(self._indicator_enabled)
         self.close_to_indicator_var.set(self._close_to_indicator)
+        self.reader_app_var.set(self._reader_open_app)
         self.countdown_var.set(self.flip_countdown)
         self._set_privacy_image_selection(settings['privacy_image'])
         self._apply_display_state()
@@ -613,6 +617,7 @@ class EInkControlGUI:
                 'reader_backup': self._reader_backup,
                 'indicator': bool(self.indicator_var.get()),
                 'close_to_indicator': bool(self.close_to_indicator_var.get()),
+                'reader_open_app': bool(self.reader_app_var.get()),
             }
             tmp = self.SETTINGS_FILE + '.tmp'
             with open(tmp, 'w') as f:
@@ -1048,6 +1053,14 @@ class EInkControlGUI:
             tab, text="Opening the lid leaves reader mode (back to OLED)", style=switch_style,
             variable=self.reader_lid_var, command=self.save_settings)
         self.reader_lid_checkbox.grid(row=row, column=0, columnspan=2, sticky='w', pady=(6, 0))
+        row += 1
+        self.reader_app_var = tk.BooleanVar(value=True)
+        self.reader_app_checkbox = ttk.Checkbutton(
+            tab, text="Open the eInk Reader fullscreen when entering reader mode", style=switch_style,
+            variable=self.reader_app_var, command=self.save_settings)
+        self.reader_app_checkbox.grid(row=row, column=0, columnspan=2, sticky='w', pady=(6, 0))
+        Tooltip(self.reader_app_checkbox, "Launches `eink-reader --fullscreen` (your last book) once the eInk is ready.\n"
+                                         "Needs the eInk Reader installed.")
         row += 1
         ttk.Label(tab, text="While reading, closing the lid does not suspend and the screen does not blank; "
                             "both are restored when you leave reader mode.",
@@ -1723,6 +1736,7 @@ class EInkControlGUI:
             'privacy_image': self._pick_privacy_image(),
             'floating_button': bool(self.floating_button_var.get()),
             'reader_rotation': self._reader_rotation,
+            'open_reader_app': bool(self.reader_app_var.get()),
         }
 
     SWITCH_LABELS = {'eink': 'eInk', 'oled': 'OLED', 'reader_on': 'reader mode', 'reader_off': 'OLED (leaving reader mode)'}
@@ -2023,7 +2037,22 @@ class EInkControlGUI:
         if not self._eink_on:
             self._enable_eink_sequence(p)
         self._apply_reader_layout(p, on=True)
+        if p.get('open_reader_app'):
+            self._ui(self._launch_reader_app)
         self.log_message("✓ Tablet reader mode on — close the lid and read")
+
+    def _launch_reader_app(self):
+        """Open the eInk Reader fullscreen (its own single-instance handling applies)."""
+        exe = shutil.which(self.READER_APP)
+        if not exe:
+            self.log_message("eInk Reader not installed — not launching it", level='warning')
+            return
+        try:
+            subprocess.Popen([exe, '--fullscreen'], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.log_message("✓ eInk Reader launched fullscreen")
+        except Exception as e:
+            self.log_message(f"Could not launch the eInk Reader: {e}", level='warning')
 
     def _leave_reader_sequence(self, p):
         """Worker thread: back to landscape/dynamic, then to the OLED."""

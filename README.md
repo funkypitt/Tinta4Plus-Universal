@@ -35,9 +35,11 @@ Base OS: **Ubuntu 24.04 LTS** or later (including Xubuntu, Kubuntu, Linux Mint).
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/Tinta4Plus-Universal/Tinta4Plus-Universal.git
+git clone --recurse-submodules https://github.com/funkypitt/Tinta4Plus-Universal.git
 cd Tinta4Plus-Universal
 ```
+
+(`--recurse-submodules` also fetches the [eInk Reader](https://github.com/funkypitt/eink-reader) into `reader/`; an existing clone gets it with `git submodule update --init`.)
 
 ### 2. Disable Secure Boot
 
@@ -84,6 +86,7 @@ sudo bash installer.sh
 5. Copies binaries/scripts to `/opt/tinta4plusu/` and creates symlinks in `/usr/local/bin/`.
 6. Installs `tinta4plusu.desktop` to `/usr/share/applications/`. The app is not started at login; an autostart entry left by an earlier version is removed.
 7. Optionally installs a PolicyKit policy (`org.tinta4plusu.helper.policy`) to cache authentication so you don't re-enter your password every time the helper starts.
+8. Optionally runs the eInk Reader's own installer from the `reader/` submodule (apt/pip dependencies, `/opt/eink-reader`, `eink-reader` launcher, desktop entry).
 
 Errors during installation are trapped and logged to `/tmp/tinta4plusu-install.log`.
 
@@ -123,6 +126,8 @@ For reading long documents (a PDF magazine, a book) with the laptop closed and h
 1. Click **📖 Tablet reader mode** (or press **Super+Shift+P**). The app switches to eInk, rotates it to portrait (touch and pen follow), selects *Reading* mode and keeps the machine awake: closing the lid no longer suspends and the screen does not blank.
 2. Close the lid — the eInk now faces you — and read. If the desktop tries to re-enable the OLED or undo the rotation on the lid event, the app puts the reader layout back within a few seconds.
 3. Open the lid (or click **Leave tablet reader mode** / Super+Shift+P). The eInk goes back to landscape and *Dynamic* mode, the privacy image is shown upright, the T-CON is powered off and the OLED returns. Lid-close behaviour and auto-rotation are restored to what they were.
+
+With the eInk Reader installed, entering reader mode also launches `eink-reader --fullscreen`, which reopens your last book fullscreen — one click from the OLED desktop to reading (Settings → *Open the eInk Reader fullscreen when entering reader mode*).
 
 Settings → *Tablet reader mode* lets you choose the orientation (portrait left / portrait right / landscape) and whether opening the lid leaves reader mode. While reading, GNOME is told not to suspend, not to lock the screen on lid close (its default when it does not suspend — with the keyboard under the lid that lock could not be dismissed) and to show the on-screen keyboard if a lock happens anyway; everything is restored when you leave. Reader mode survives a GUI restart (the inhibitors are re-acquired) and a crash (the overridden GNOME settings are restored on the next start).
 
