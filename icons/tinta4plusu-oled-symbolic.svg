@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- Tinta4PlusU: OLED active (laptop display) -->
+  <path fill="#bebebe" fill-rule="evenodd" d="M2 2h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm0.5 1.5v7h11v-7z"/>
+  <rect fill="#bebebe" x="0" y="13" width="16" height="1.5" rx="0.5"/>
+</svg>

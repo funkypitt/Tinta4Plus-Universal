@@ -58,9 +58,11 @@ do_uninstall() {
     rm -f  "${BIN_DIR}/tinta4plusu"
     rm -f  "${BIN_DIR}/tinta4plusu-helper"
     rm -f  "${BIN_DIR}/toggle-eink"
+    rm -f  "${BIN_DIR}/tinta4plusu-indicator"
     rm -rf "${INSTALL_DIR}"
     rm -f  "${DESKTOP_DIR}/tinta4plusu.desktop"
     rm -f  "${AUTOSTART_DIR}/tinta4plusu-autostart.desktop"
+    rm -f  "${AUTOSTART_DIR}/tinta4plusu-indicator.desktop"
     rm -f  "${POLKIT_DIR}/org.tinta4plusu.helper.policy"
 
     info "Tinta4PlusU has been uninstalled."
@@ -195,8 +197,8 @@ detect_de() {
 install_deps() {
     step "Installing system dependencies"
 
-    # Common packages
-    local pkgs="libusb-1.0-0"
+    # Common packages (gir1.2-*: top-bar indicator, D-Bus control service)
+    local pkgs="libusb-1.0-0 python3-gi python3-dbus gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1"
 
     # Python scripts need the full Python stack
     # python3-pil: privacy-image thumbnails in the GUI (optional at runtime)
@@ -320,6 +322,8 @@ install_binary() {
     ln -sf "${INSTALL_DIR}/tinta4plusu/tinta4plusu"              "${BIN_DIR}/tinta4plusu"
     ln -sf "${INSTALL_DIR}/tinta4plusu-helper/tinta4plusu-helper" "${BIN_DIR}/tinta4plusu-helper"
 
+    install_indicator_files
+
     # Install toggle-eink CLI tool (Python script, works with both install modes)
     if [ -f "${SCRIPT_DIR}/toggle-eink.py" ]; then
         cp "${SCRIPT_DIR}/toggle-eink.py" "${INSTALL_DIR}/"
@@ -368,6 +372,7 @@ install_script() {
         WatchdogTimer.py
         GlobalHotkeyListener.py
         toggle-eink.py
+        Indicator.py
     )
 
     local copy_failed=false
@@ -425,7 +430,23 @@ exec python3 /opt/tinta4plusu/toggle-eink.py "$@"
 WRAPPER
     chmod 755 "${BIN_DIR}/toggle-eink"
 
+    install_indicator_files
+
     info "Python scripts installed."
+}
+
+# ─── Top-bar indicator (script in both modes) ───────────────────────────────
+
+install_indicator_files() {
+    mkdir -p "${INSTALL_DIR}/icons"
+    cp "${SCRIPT_DIR}/Indicator.py" "${INSTALL_DIR}/"
+    cp "${SCRIPT_DIR}"/icons/tinta4plusu-*-symbolic.svg "${INSTALL_DIR}/icons/"
+    cat > "${BIN_DIR}/tinta4plusu-indicator" << 'WRAPPER'
+#!/bin/bash
+exec python3 /opt/tinta4plusu/Indicator.py "$@"
+WRAPPER
+    chmod 755 "${BIN_DIR}/tinta4plusu-indicator"
+    info "Top-bar indicator installed (tinta4plusu-indicator)."
 }
 
 # ─── Install desktop entries ────────────────────────────────────────────────
@@ -434,10 +455,23 @@ install_desktop() {
     step "Installing desktop entries"
 
     cp "${SCRIPT_DIR}/tinta4plusu.desktop"           "${DESKTOP_DIR}/"
-    # No login autostart: the app is always opened by the user, so opening it
-    # always goes with the helper's admin password prompt. Remove the entry
-    # left by earlier versions.
+    # The GUI itself is not autostarted (it would prompt for the helper's
+    # admin password at every login). Remove the entry left by earlier versions.
     rm -f "${AUTOSTART_DIR}/tinta4plusu-autostart.desktop"
+
+    # The indicator can start at login: it shows in the top bar, starts the
+    # control window hidden, and only triggers the password prompt on the
+    # first real action.
+    echo ""
+    read -rp "Start the top-bar indicator at login? [Y/n] " answer
+    if [[ ! "$answer" =~ ^[Nn]$ ]]; then
+        mkdir -p "${AUTOSTART_DIR}"
+        cp "${SCRIPT_DIR}/tinta4plusu-indicator.desktop" "${AUTOSTART_DIR}/"
+        info "Indicator autostart installed."
+    else
+        rm -f "${AUTOSTART_DIR}/tinta4plusu-indicator.desktop"
+        info "Indicator autostart skipped (run 'tinta4plusu-indicator' manually)."
+    fi
 
     # Validate desktop files if desktop-file-validate is available
     if command -v desktop-file-validate &>/dev/null; then
@@ -511,6 +545,7 @@ main() {
     info " Installation complete! (mode: ${INSTALL_MODE})"
     info ""
     info " Launch from terminal:  tinta4plusu"
+    info " Top-bar indicator:    tinta4plusu-indicator"
     info " Toggle eInk/OLED:     toggle-eink"
     info " Or find 'Tinta4PlusU' in your application menu."
     info ""

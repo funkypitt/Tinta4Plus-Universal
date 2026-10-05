@@ -47,6 +47,7 @@ import json
 import io
 import glob
 import queue
+import shutil
 from datetime import datetime
 
 try:
@@ -261,6 +262,76 @@ class SwitchError(Exception):
     """A display switch could not be completed (already rolled back)."""
 
 
+GUI_BUS_NAME = 'org.tinta4plusu.Gui'
+GUI_OBJECT_PATH = '/org/tinta4plusu/Gui'
+GUI_IFACE = 'org.tinta4plusu.Gui'
+INDICATOR_BUS_NAME = 'org.tinta4plusu.Indicator'
+
+
+def _make_dbus_service(app, bus):
+    """Export the GUI's control interface on the session bus.
+
+    Created on the thread that runs the GLib main loop (the resume monitor),
+    which is where dbus-python dispatches incoming calls; handlers hop to the
+    Tk thread via app._ui(). Used by the top-bar indicator and scripts:
+
+        gdbus call --session --dest org.tinta4plusu.Gui \
+              --object-path /org/tinta4plusu/Gui --method org.tinta4plusu.Gui.Toggle
+    """
+    import dbus
+    import dbus.service
+
+    class GuiService(dbus.service.Object):
+        def __init__(self):
+            # Keep our own reference: dbus.service.Object stores *its* bus name
+            # in self._name, so a BusName kept there would be overwritten and
+            # released by the garbage collector.
+            self._owned_bus_name = dbus.service.BusName(GUI_BUS_NAME, bus)
+            super().__init__(self._owned_bus_name, GUI_OBJECT_PATH)
+
+        @dbus.service.method(GUI_IFACE, out_signature='a{sv}')
+        def GetState(self):
+            return app.get_state_dict()
+
+        @dbus.service.method(GUI_IFACE)
+        def Toggle(self):
+            app._ui(app.on_eink_toggled)
+
+        @dbus.service.method(GUI_IFACE)
+        def ReaderMode(self):
+            app._ui(app.on_reader_toggled)
+
+        @dbus.service.method(GUI_IFACE)
+        def Refresh(self):
+            app._ui(app.on_refresh_full)
+
+        @dbus.service.method(GUI_IFACE, in_signature='s')
+        def SetMode(self, mode):
+            app._ui(app.on_set_reading if str(mode) == 'reading' else app.on_set_dynamic)
+
+        @dbus.service.method(GUI_IFACE, in_signature='i')
+        def SetBrightness(self, level):
+            app._ui(app.set_brightness_from_remote, int(level))
+
+        @dbus.service.method(GUI_IFACE)
+        def Connect(self):
+            app._ui(app.connect_from_remote)
+
+        @dbus.service.method(GUI_IFACE)
+        def Show(self):
+            app._ui(app.show_window)
+
+        @dbus.service.method(GUI_IFACE)
+        def Hide(self):
+            app._ui(app.hide_window)
+
+        @dbus.service.method(GUI_IFACE)
+        def Quit(self):
+            app._ui(app.on_closing)
+
+    return GuiService()
+
+
 # ----------------------------------------------------------------------
 # Main application
 # ----------------------------------------------------------------------
@@ -315,6 +386,11 @@ class EInkControlGUI:
         ('org.gnome.settings-daemon.plugins.power', 'lid-close-ac-action', "'nothing'"),
         ('org.gnome.settings-daemon.plugins.power', 'lid-close-battery-action', "'nothing'"),
         ('org.gnome.settings-daemon.peripherals.touchscreen', 'orientation-lock', 'true'),
+        # gsd locks the screen on lid close when it does not suspend; with the
+        # keyboard under the closed lid that lock cannot be dismissed.
+        ('org.gnome.desktop.screensaver', 'lock-enabled', 'false'),
+        # If something still locks, the on-screen keyboard makes it dismissable.
+        ('org.gnome.desktop.a11y.applications', 'screen-keyboard-enabled', 'true'),
     ]
 
     DEFAULT_SETTINGS = {
@@ -329,13 +405,20 @@ class EInkControlGUI:
         'reader_lid_open_exits': True,   # opening the lid leaves reader mode (-> OLED)
         'reader_active': False,          # persisted so a restart knows we are reading
         'reader_backup': None,           # gsettings values to restore after reader mode
+        'indicator': True,               # start the top-bar indicator with the GUI
+        'close_to_indicator': True,      # window close hides when the indicator runs
     }
 
-    def __init__(self, root, HELPER_SCRIPT, logger, autostart=False, ui_preview=False):
+    def __init__(self, root, HELPER_SCRIPT, logger, autostart=False, ui_preview=False, start_hidden=False):
         self.HELPER_SCRIPT = HELPER_SCRIPT
         self.logger = logger
         self.root = root
         self.ui_preview = ui_preview
+        self.start_hidden = start_hidden
+        self._window_visible = not start_hidden
+        self._indicator_process = None
+        self._dbus_service = None
+        self._brightness_level = 4
         self._main_thread = threading.current_thread()
         self._ui_queue = queue.Queue()
         self._destroyed = False
@@ -413,6 +496,8 @@ class EInkControlGUI:
         self._reader_lid_open_exits = bool(settings['reader_lid_open_exits'])
         self._reader_was_active = bool(settings['reader_active'])
         self._reader_backup = settings['reader_backup'] if isinstance(settings['reader_backup'], dict) else None
+        self._indicator_enabled = bool(settings['indicator'])
+        self._close_to_indicator = bool(settings['close_to_indicator'])
 
         # Build UI
         self._thumbnail_cache = {}
@@ -428,13 +513,18 @@ class EInkControlGUI:
         self.reader_orientation_var.set(next((k for k, v in self.READER_ORIENTATIONS.items()
                                               if v == self._reader_rotation), 'Portrait (left)'))
         self.reader_lid_var.set(self._reader_lid_open_exits)
+        self.indicator_var.set(self._indicator_enabled)
+        self.close_to_indicator_var.set(self._close_to_indicator)
         self.countdown_var.set(self.flip_countdown)
         self._set_privacy_image_selection(settings['privacy_image'])
         self._apply_display_state()
         self._set_connection_state('disconnected')
 
-        # Set up window close handler
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # Window close: hide behind the indicator, or quit
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close_request)
+        self.root.bind('<Control-q>', lambda e: self.on_closing())
+        if self.start_hidden:
+            self.root.withdraw()
 
         # Pump for UI calls coming from worker threads
         self._ui_pump_after = self.root.after(self.UI_QUEUE_POLL_MS, self._drain_ui_queue)
@@ -463,8 +553,11 @@ class EInkControlGUI:
         if self.saved_keyboard_layout:
             self.logger.info(f"Saved initial keyboard layout: {self.saved_keyboard_layout}")
 
-        # Start monitoring for system resume (lid open / wake from suspend)
+        # Start monitoring for system resume (lid open / wake from suspend);
+        # the same thread hosts the D-Bus control service.
         self._start_resume_monitor()
+        if self._indicator_enabled:
+            self.root.after(1500, self._ensure_indicator)
 
         if autostart:
             # Autostart mode: don't launch helper immediately (avoids password prompt at login)
@@ -518,6 +611,8 @@ class EInkControlGUI:
                 'reader_lid_open_exits': bool(self.reader_lid_var.get()),
                 'reader_active': bool(self._reader_on),
                 'reader_backup': self._reader_backup,
+                'indicator': bool(self.indicator_var.get()),
+                'close_to_indicator': bool(self.close_to_indicator_var.get()),
             }
             tmp = self.SETTINGS_FILE + '.tmp'
             with open(tmp, 'w') as f:
@@ -961,6 +1056,25 @@ class EInkControlGUI:
         ttk.Separator(tab).grid(row=row, column=0, columnspan=2, sticky='ew', pady=12)
         row += 1
 
+        # Indicator
+        self.indicator_var = tk.BooleanVar(value=True)
+        self.indicator_checkbox = ttk.Checkbutton(
+            tab, text="Show an indicator in the top bar", style=switch_style,
+            variable=self.indicator_var, command=self.on_indicator_changed)
+        self.indicator_checkbox.grid(row=row, column=0, columnspan=2, sticky='w', pady=(0, 0))
+        Tooltip(self.indicator_checkbox, "Switch display, reader mode, refresh, eInk mode and frontlight from the panel.\n"
+                                        "Needs the AppIndicator extension on GNOME (enabled by default on Ubuntu).")
+        row += 1
+        self.close_to_indicator_var = tk.BooleanVar(value=True)
+        self.close_to_indicator_checkbox = ttk.Checkbutton(
+            tab, text="Closing the window keeps running in the top bar", style=switch_style,
+            variable=self.close_to_indicator_var, command=self.save_settings)
+        self.close_to_indicator_checkbox.grid(row=row, column=0, columnspan=2, sticky='w', pady=(4, 0))
+        Tooltip(self.close_to_indicator_checkbox, "Ctrl+Q or the indicator's Quit exits for real.")
+        row += 1
+        ttk.Separator(tab).grid(row=row, column=0, columnspan=2, sticky='ew', pady=12)
+        row += 1
+
         # Text size
         ttk.Label(tab, text="Text size").grid(row=row, column=0, sticky='w', padx=(0, 12), pady=(0, 0))
         size_row = ttk.Frame(tab)
@@ -984,6 +1098,7 @@ class EInkControlGUI:
             ("Help  (Fn+F9)", "Full eInk refresh"),
             ("Fn+F5 / Fn+F6", "Frontlight down / up (eInk only; OLED brightness otherwise)"),
             ("Esc", "Cancel a running countdown (this window)"),
+            ("Ctrl+Q", "Quit (closing the window only hides it while the indicator runs)"),
         ]
         for keys, what in shortcuts:
             ttk.Label(tab, text=keys, font=self.font_mono).grid(row=row, column=0, sticky='w', padx=(0, 12), pady=(3, 0))
@@ -2170,6 +2285,7 @@ class EInkControlGUI:
     def _set_brightness_ui(self, level):
         """Reflect a brightness level in the slider/label without sending it."""
         level = max(0, min(self.BRIGHTNESS_MAX, int(level)))
+        self._brightness_level = level
         self._brightness_programmatic = True
         try:
             self.brightness_var.set(level)
@@ -2182,6 +2298,7 @@ class EInkControlGUI:
         if self._brightness_programmatic:
             return
         level = int(round(float(value)))
+        self._brightness_level = level
         self._brightness_programmatic = True
         try:
             self.brightness_var.set(level)   # snap the knob to whole steps
@@ -2363,6 +2480,106 @@ class EInkControlGUI:
         self.privacy_preview.config(image=photo)
         self.privacy_preview.image = photo
 
+    # ------------------------------------------------------------------
+    # Indicator / D-Bus control
+    # ------------------------------------------------------------------
+
+    def get_state_dict(self):
+        """State for the indicator (any thread; plain mirrors only)."""
+        return {
+            'connected': self._connection_state == 'connected',
+            'eink_on': bool(self._eink_on),
+            'reader_on': bool(self._reader_on),
+            'switching': bool(self._switching),
+            'countdown': int(self._countdown_remaining if self._countdown_after is not None else 0),
+            'mode': self._eink_mode or '',
+            'brightness': int(self._brightness_level),
+            'frontlight_available': bool(self._ec_available),
+            'window_visible': bool(self._window_visible),
+        }
+
+    def set_brightness_from_remote(self, level):
+        level = max(0, min(self.BRIGHTNESS_MAX, int(level)))
+        self._set_brightness_ui(level)
+        self._set_brightness(level)
+
+    def connect_from_remote(self):
+        if self._connection_state == 'disconnected':
+            self.show_window()
+            self.initialize_helper()
+
+    def show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+        self._window_visible = True
+
+    def hide_window(self):
+        self.root.withdraw()
+        self._window_visible = False
+
+    def on_close_request(self):
+        """Window close button: hide behind the indicator when it is running."""
+        if self._close_to_indicator and not self._closing and self._indicator_running():
+            self.hide_window()
+            self.log_message("Window hidden — still running in the top bar (Quit from the indicator or Ctrl+Q)")
+            return
+        self.on_closing()
+
+    def _indicator_running(self):
+        proc = self._indicator_process
+        if proc is not None and proc.poll() is None:
+            return True
+        try:
+            import dbus
+            return bool(dbus.SessionBus().name_has_owner(INDICATOR_BUS_NAME))
+        except Exception:
+            return False
+
+    def _indicator_command(self):
+        for candidate in (shutil.which('tinta4plusu-indicator'), os.path.join(_base_dir(), 'Indicator.py')):
+            if candidate and os.path.exists(candidate):
+                return [candidate] if not candidate.endswith('.py') else [sys.executable, candidate]
+        return None
+
+    def _ensure_indicator(self):
+        """Start the top-bar indicator unless one is already running."""
+        if self.ui_preview or not self.indicator_var.get() or self._indicator_running():
+            return
+        cmd = self._indicator_command()
+        if not cmd:
+            self.logger.info("Indicator not installed")
+            return
+        try:
+            self._indicator_process = subprocess.Popen(
+                cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.logger.info("Started top-bar indicator")
+        except Exception as e:
+            self.log_message(f"Could not start the indicator: {e}", level='warning')
+
+    def on_indicator_changed(self):
+        self.save_settings()
+        if self.indicator_var.get():
+            self._ensure_indicator()
+        elif self._indicator_process is not None and self._indicator_process.poll() is None:
+            self._indicator_process.terminate()
+            self._indicator_process = None
+
+    def _start_dbus_service(self, bus_module):
+        """Export org.tinta4plusu.Gui (called on the GLib loop thread)."""
+        try:
+            session = bus_module.SessionBus()
+            if session.name_has_owner(GUI_BUS_NAME):
+                self.logger.warning("D-Bus name already owned — control service not started")
+                return
+            self._dbus_service = _make_dbus_service(self, session)
+            self.logger.info(f"D-Bus control service at {GUI_BUS_NAME}")
+        except Exception as e:
+            self.logger.warning(f"D-Bus control service unavailable: {e}")
+
     def on_buy_coffee(self):
         """Open the upstream author's Buy Me A Coffee page"""
         try:
@@ -2452,6 +2669,8 @@ class EInkControlGUI:
                     'org.freedesktop.UPower', 'LidIsClosed'))
             except Exception:
                 pass
+
+            self._start_dbus_service(dbus)
 
             self._glib_loop = GLib.MainLoop()
             self.logger.info("Resume monitor started (D-Bus PrepareForSleep)")
@@ -2560,6 +2779,8 @@ class EInkControlGUI:
                 pass
 
         self._uninhibit_sleep()
+        if self._indicator_process is not None and self._indicator_process.poll() is None:
+            self._indicator_process.terminate()
         if self._reader_on:
             # Leaving with the eInk still rotated (helper gone): at least undo the system prefs
             self._release_reader_inhibitors()
@@ -2766,6 +2987,7 @@ def _setup_logging():
 def main():
     """Entry point"""
     autostart = '--autostart' in sys.argv
+    start_hidden = '--hidden' in sys.argv      # used by the indicator's login autostart
     # Developer mode: no helper, no display changes. Optional =connected / =eink
     ui_preview = False
     for arg in sys.argv[1:]:
@@ -2789,8 +3011,14 @@ def main():
     HELPER_SCRIPT = _resolve_helper_path(logger)
 
     if not ui_preview and not acquire_single_instance_lock(logger):
-        # Tell the user where the existing window is instead of silently exiting:
-        # the launcher was probably clicked because the window was hidden.
+        # Another copy is running: ask it to show its window (it may be hidden
+        # behind the indicator); fall back to a notice if it cannot be reached.
+        try:
+            import dbus
+            dbus.Interface(dbus.SessionBus().get_object(GUI_BUS_NAME, GUI_OBJECT_PATH), GUI_IFACE).Show()
+            sys.exit(0)
+        except Exception:
+            pass
         root = tk.Tk(className='tinta4plusu')
         root.withdraw()
         messagebox.showinfo("Tinta4PlusU already running",
@@ -2813,7 +3041,8 @@ def main():
 
     # User agreed, show the main window
     root.deiconify()
-    app = EInkControlGUI(root, HELPER_SCRIPT, logger, autostart=autostart, ui_preview=ui_preview)
+    app = EInkControlGUI(root, HELPER_SCRIPT, logger, autostart=autostart, ui_preview=ui_preview,
+                         start_hidden=start_hidden)
 
     try:
         root.mainloop()

@@ -75,7 +75,7 @@ sudo bash installer.sh
 1. Asks you to choose between compiled binary or Python script mode.
 2. Detects your desktop environment (GNOME, Cinnamon, XFCE, KDE) using three fallback methods: environment variables, loginctl session query, and process detection.
 3. Installs apt dependencies:
-   - **Common**: `libusb-1.0-0`, `python3-tk`, `python3-evdev`
+   - **Common**: `libusb-1.0-0`, `python3-tk`, `python3-evdev`, `python3-gi`, `python3-dbus`, `gir1.2-gtk-3.0`, `gir1.2-ayatanaappindicator3-0.1` (indicator)
    - **Script mode** adds: `python3`, `python3-usb`, `python3-pil`, `python3-dbus`, `python3-gi`
    - **GNOME/Cinnamon** adds: `gnome-themes-extra`, `policykit-1-gnome` (required for pkexec password dialog)
    - **KDE** adds: `kscreen`, `plasma-workspace`
@@ -124,7 +124,17 @@ For reading long documents (a PDF magazine, a book) with the laptop closed and h
 2. Close the lid — the eInk now faces you — and read. If the desktop tries to re-enable the OLED or undo the rotation on the lid event, the app puts the reader layout back within a few seconds.
 3. Open the lid (or click **Leave tablet reader mode** / Super+Shift+P). The eInk goes back to landscape and *Dynamic* mode, the privacy image is shown upright, the T-CON is powered off and the OLED returns. Lid-close behaviour and auto-rotation are restored to what they were.
 
-Settings → *Tablet reader mode* lets you choose the orientation (portrait left / portrait right / landscape) and whether opening the lid leaves reader mode. Reader mode survives a GUI restart (the inhibitors are re-acquired) and a crash (the overridden GNOME lid settings are restored on the next start).
+Settings → *Tablet reader mode* lets you choose the orientation (portrait left / portrait right / landscape) and whether opening the lid leaves reader mode. While reading, GNOME is told not to suspend, not to lock the screen on lid close (its default when it does not suspend — with the keyboard under the lid that lock could not be dismissed) and to show the on-screen keyboard if a lock happens anyway; everything is restored when you leave. Reader mode survives a GUI restart (the inhibitors are re-acquired) and a crash (the overridden GNOME settings are restored on the next start).
+
+### Top-bar indicator
+
+`tinta4plusu-indicator` puts an icon in the panel (GNOME needs the AppIndicator extension, enabled by default on Ubuntu; KDE/XFCE/Cinnamon show it natively). Its menu shows the current state (OLED / eInk / reader) and offers *Switch to eInk/OLED*, *Tablet reader mode*, *Refresh*, *eInk mode*, *Frontlight*, *Open control window* and *Quit*. The control window starts the indicator automatically (Settings → *Show an indicator in the top bar*); closing the window then just hides it — the indicator or Ctrl+Q quits for real. The installer can start the indicator at login, which launches the control window hidden and only asks for the helper's password on the first real action.
+
+The indicator talks to the window over D-Bus (`org.tinta4plusu.Gui` on the session bus: `Toggle`, `ReaderMode`, `Refresh`, `SetMode`, `SetBrightness`, `Show`, `Quit`, `GetState`), which scripts can use too:
+
+```bash
+gdbus call --session --dest org.tinta4plusu.Gui --object-path /org/tinta4plusu/Gui --method org.tinta4plusu.Gui.Toggle
+```
 
 ### eInk display modes
 
@@ -229,6 +239,7 @@ Two-process model communicating via Unix socket (`/tmp/tinta4plusu.sock`):
 | `EInkUSBController.py` | USB T-CON controller | Root |
 | `WatchdogTimer.py` | Daemon watchdog (60s without a client command) | Root |
 | `toggle-eink.py` | CLI display toggle (no GUI needed) | User |
+| `Indicator.py` | Top-bar indicator (GTK/AppIndicator), drives the GUI over D-Bus | User |
 | `touch_diagnostic.py` | Touchscreen mapping diagnostic | User |
 
 ### Security model

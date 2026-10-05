@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Tinta4PlusU Indicator
+Comment=eInk display control in the top bar (starts the control window hidden)
+Exec=/usr/local/bin/tinta4plusu-indicator --autostart
+Icon=preferences-desktop-display
+Terminal=false
+Type=Application
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5

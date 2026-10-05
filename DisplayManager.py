@@ -388,21 +388,21 @@ class DisplayManager:
         if native_width and native_height:
             cmd.extend(['--mode', f'{native_width}x{native_height}'])
             cmd.extend(['--pos', '0x0'])
-            # The panning area is in screen space, so it follows the rotation
-            pan_w, pan_h = (native_height, native_width) if self.is_portrait(rotation) else (native_width, native_height)
+            scale_inv = 1.0 / scale if (scale is not None and scale != 1.0) else 1.0
+            cmd.extend(['--scale', f'{scale_inv}x{scale_inv}' if scale_inv != 1.0 else '1x1'])
 
-            if scale is not None and scale != 1.0:
-                scale_inv = 1.0 / scale
-                panning_width = int(pan_w * scale_inv)
-                panning_height = int(pan_h * scale_inv)
+            if rotation == 'normal':
+                # Panning pins the framebuffer to the (scaled) output size so a
+                # leftover larger screen never turns into a scrolling desktop.
+                panning_width = int(native_width * scale_inv)
+                panning_height = int(native_height * scale_inv)
                 cmd.extend(['--panning', f'{panning_width}x{panning_height}'])
-                cmd.extend(['--scale', f'{scale_inv}x{scale_inv}'])
-                self.logger.info(f"Scaling: virtual desktop {panning_width}x{panning_height}, "
-                               f"xrandr scale {scale_inv:.3f}x{scale_inv:.3f} (our scale={scale}), "
-                               f"physical {native_width}x{native_height}, rotation {rotation}")
-            else:
-                cmd.extend(['--panning', f'{pan_w}x{pan_h}'])
-                cmd.extend(['--scale', '1x1'])
+            # Rotated: the X server refuses RRSetPanning on a rotated CRTC
+            # (BadMatch). xrandr grows the framebuffer as needed; once this is
+            # the only active output _fit_framebuffer_x11() shrinks it back.
+            if scale_inv != 1.0:
+                self.logger.info(f"Scaling: xrandr scale {scale_inv:.3f} (our scale={scale}), "
+                                 f"physical {native_width}x{native_height}, rotation {rotation}")
         else:
             cmd.extend(['--auto', '--pos', '0x0'])
 
@@ -490,6 +490,7 @@ class DisplayManager:
                 scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
                 rot_info = f", rotation {rotation}" if rotation != 'normal' else ""
                 self.logger.info(f"Enabled display: {display_name}{scale_info}{rot_info}")
+                self._fit_framebuffer_x11(display_name)
                 return True
 
             # Verification failed — reset to baseline and retry once
@@ -504,9 +505,10 @@ class DisplayManager:
             except Exception:
                 pass
 
-            if self._is_display_active_x11(display_name):
+            if self._verify_display_state_x11(display_name, expect_active=True, scale=scale, rotation=rotation):
                 scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
                 self.logger.info(f"Enabled display (after retry): {display_name}{scale_info}")
+                self._fit_framebuffer_x11(display_name)
                 return True
             else:
                 self.logger.error(f"Failed to enable display: {display_name} (display not active after retry)")
@@ -515,6 +517,30 @@ class DisplayManager:
         except Exception as e:
             self.logger.error(f"Failed to enable display: {e}")
             return False
+
+    def _fit_framebuffer_x11(self, display_name):
+        """Shrink the X framebuffer to this output when it is the only active one.
+
+        Enabling a rotated output (no panning possible) can leave the screen
+        larger than the output; an oversized framebuffer confuses window
+        placement and, with panning on the other output, scrolls the desktop.
+        """
+        try:
+            others = [c for c in (self.OLED_CONNECTOR, self.EINK_CONNECTOR) if c != display_name]
+            if any(self._is_display_active_x11(c) for c in others):
+                return
+            geom = self._get_display_geometry_x11(display_name)
+            screen = self._get_screen_size_x11()
+            # A rotated CRTC is sometimes reported at x=-1; treat that as the origin
+            if not geom or not screen or abs(geom['x']) > 1 or abs(geom['y']) > 1:
+                return
+            if (geom['width'], geom['height']) != screen or geom['x'] or geom['y']:
+                subprocess.run(['xrandr', '--output', display_name, '--pos', '0x0',
+                                '--fb', f"{geom['width']}x{geom['height']}"],
+                               capture_output=True, timeout=5)
+                self.logger.info(f"Framebuffer fitted to {geom['width']}x{geom['height']}")
+        except Exception as e:
+            self.logger.warning(f"Framebuffer fit failed: {e}")
 
     def _get_display_rotation_x11(self, display_name):
         """Parse the rotation of an output from `xrandr --query`.
@@ -1578,7 +1604,7 @@ except Exception as e:
                 if 'virtual core' in lower or 'xtest' in lower:
                     continue
                 is_touch = 'touch' in lower and 'touchpad' not in lower
-                is_pen = any(k in lower for k in ('stylus', 'eraser', ' pen '))
+                is_pen = any(k in lower for k in ('stylus', 'eraser', ' pen ')) and self._has_abs_axes(dev_id)
                 # Also match ELAN digitizer devices (common on ThinkBooks)
                 is_elan_digitizer = ('elan' in lower and 'touchpad' not in lower
                                      and 'fingerprint' not in lower and 'mouse' not in lower)
@@ -1597,17 +1623,10 @@ except Exception as e:
                         continue
                     if 'touchpad' in lower or 'mouse' in lower or 'trackpoint' in lower:
                         continue
-                    # Check if this device has AbsMT axes (touchscreen indicator)
-                    try:
-                        props = subprocess.run(
-                            ['xinput', 'list-props', str(dev_id)],
-                            capture_output=True, text=True, timeout=2
-                        )
-                        if 'Abs MT' in props.stdout or 'Touch' in props.stdout:
-                            devices.append((dev_id, name))
-                            seen_ids.add(dev_id)
-                    except Exception:
-                        pass
+                    # Check if this device has absolute (touch) axes
+                    if self._has_abs_axes(dev_id):
+                        devices.append((dev_id, name))
+                        seen_ids.add(dev_id)
 
             return devices
 
@@ -1635,6 +1654,19 @@ except Exception as e:
         return tuple(
             sum(a[i * 3 + k] * r[k * 3 + j] for k in range(3))
             for i in range(3) for j in range(3))
+
+    def _has_abs_axes(self, dev_id):
+        """True if an xinput device reports absolute axes (mappable to an output).
+
+        Axes are listed by `xinput list <id>` (not list-props): e.g. the eInk's
+        'ITE T-CON Stylus' has none and would BadMatch on map-to-output.
+        """
+        try:
+            info = subprocess.run(['xinput', 'list', str(dev_id)],
+                                  capture_output=True, text=True, timeout=2)
+            return 'Label: Abs X' in info.stdout or 'Label: Abs MT Position X' in info.stdout
+        except Exception:
+            return False
 
     def _map_touch_x11(self, display_name, rotation='normal'):
         """Map touch/pen devices to a display using xinput (X11), honouring rotation."""
