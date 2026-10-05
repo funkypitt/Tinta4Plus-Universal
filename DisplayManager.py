@@ -1206,31 +1206,35 @@ except Exception as e:
             self.logger.info(f"Display {display_name} already disabled")
             return True
 
-        # Rebuild logical monitors excluding the target
+        # Rebuild logical monitors without the target. A logical monitor may
+        # hold several monitors (GNOME's fallback mirrors both panels into
+        # one): then only the target is removed from it, not the whole thing.
         logical_configs = []
         for lm in state.get('logical_monitors', []):
-            connectors_in_lm = [ms['connector'] for ms in lm['monitors']]
-            if display_name not in connectors_in_lm:
-                lm_monitors_spec = []
-                for ms in lm['monitors']:
-                    mon_info = self._find_monitor_in_state(state, ms['connector'])
-                    mode_id = ''
-                    if mon_info:
-                        for mm in mon_info['modes']:
-                            if mm.get('is_current'):
-                                mode_id = mm['id']
-                                break
-                        if not mode_id and mon_info['modes']:
-                            mode_id = mon_info['modes'][0]['id']
-                    lm_monitors_spec.append((ms['connector'], mode_id, {}))
+            lm_monitors_spec = []
+            for ms in lm['monitors']:
+                if ms['connector'] == display_name:
+                    continue
+                mon_info = self._find_monitor_in_state(state, ms['connector'])
+                mode_id = ''
+                if mon_info:
+                    for mm in mon_info['modes']:
+                        if mm.get('is_current'):
+                            mode_id = mm['id']
+                            break
+                    if not mode_id and mon_info['modes']:
+                        mode_id = mon_info['modes'][0]['id']
+                lm_monitors_spec.append((ms['connector'], mode_id, {}))
+            if not lm_monitors_spec:
+                continue
 
-                logical_configs.append({
-                    'x': lm['x'], 'y': lm['y'],
-                    'scale': lm['scale'],
-                    'transform': lm['transform'],
-                    'primary': lm['primary'],
-                    'monitors': lm_monitors_spec,
-                })
+            logical_configs.append({
+                'x': lm['x'], 'y': lm['y'],
+                'scale': lm['scale'],
+                'transform': lm['transform'],
+                'primary': lm['primary'],
+                'monitors': lm_monitors_spec,
+            })
 
         if not logical_configs:
             self.logger.error("Cannot disable all displays")

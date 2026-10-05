@@ -114,39 +114,26 @@ class ResumeCheck:
     # ------------------------------------------------------------------
 
     def _fix_both_active(self, expect_eink, saved_oled_scale):
-        """Both displays are on — disable the wrong one."""
-        fixes = []
+        """Both displays are on — keep only the expected one (one atomic call on GNOME)."""
         if expect_eink:
-            self.dm.disable_display(self.dm.OLED_CONNECTOR)
-            fixes.append("Fixed: disabled OLED (both were active, eInk expected)")
-        else:
-            self.dm.disable_display(self.dm.EINK_CONNECTOR)
-            time.sleep(0.5)
-            scale = saved_oled_scale or 1.0
-            self.dm.enable_display(self.dm.OLED_CONNECTOR, scale=scale)
-            fixes.append("Fixed: disabled eInk and re-applied OLED "
-                         "(both were active)")
-        return fixes
+            self.dm.set_sole_output(self.dm.EINK_CONNECTOR, scale=self._eink_scale,
+                                    rotation=self._eink_rotation)
+            return ["Fixed: disabled OLED (both were active, eInk expected)"]
+        self.dm.set_sole_output(self.dm.OLED_CONNECTOR, scale=saved_oled_scale or 1.0)
+        return ["Fixed: disabled eInk and re-applied OLED (both were active)"]
 
     def _fix_none_active(self, expect_eink, saved_oled_scale):
         """No display is active — enable the expected one."""
-        fixes = []
         if expect_eink:
-            self.dm.enable_display(self.dm.EINK_CONNECTOR, scale=self._eink_scale,
-                                   rotation=self._eink_rotation)
-            fixes.append("Fixed: enabled eInk (no display was active)")
-        else:
-            scale = saved_oled_scale or 1.0
-            self.dm.enable_display(self.dm.OLED_CONNECTOR, scale=scale)
-            fixes.append("Fixed: enabled OLED (no display was active)")
-        return fixes
+            self.dm.set_sole_output(self.dm.EINK_CONNECTOR, scale=self._eink_scale,
+                                    rotation=self._eink_rotation)
+            return ["Fixed: enabled eInk (no display was active)"]
+        self.dm.set_sole_output(self.dm.OLED_CONNECTOR, scale=saved_oled_scale or 1.0)
+        return ["Fixed: enabled OLED (no display was active)"]
 
     def _switch_eink_to_oled(self, saved_oled_scale):
         """eInk is active but OLED was expected — switch."""
-        self.dm.disable_display(self.dm.EINK_CONNECTOR)
-        time.sleep(0.5)
-        scale = saved_oled_scale or 1.0
-        self.dm.enable_display(self.dm.OLED_CONNECTOR, scale=scale)
+        self.dm.set_sole_output(self.dm.OLED_CONNECTOR, scale=saved_oled_scale or 1.0)
         return ["Fixed: switched from eInk to OLED"]
 
     # ------------------------------------------------------------------
