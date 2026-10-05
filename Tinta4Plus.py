@@ -560,6 +560,7 @@ class EInkControlGUI:
         # Start monitoring for system resume (lid open / wake from suspend);
         # the same thread hosts the D-Bus control service.
         self._start_resume_monitor()
+        self._start_layout_watchdog()
         if self._indicator_enabled:
             self.root.after(1500, self._ensure_indicator)
 
@@ -1847,18 +1848,39 @@ class EInkControlGUI:
                 self._set_theme(self.THEME_ADWAITA_DARK)
             raise SwitchError(reason)
 
-        # Step 1: Enable E-Ink output first (overlapping the OLED)
-        self._set_busy_hint("Enabling the eInk output…")
-        self.log_message(f"Enabling E-Ink display on {self.DISPLAY_EINK} with {p['scale']}x scale"
-                         + (f", {rotation}" if rotation != 'normal' else "") + "...")
-        if not self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation):
-            rollback(f"could not enable {self.DISPLAY_EINK}")
-        self.log_message(f"✓ E-Ink display ({self.DISPLAY_EINK}) enabled with {p['scale']}x scale")
-        time.sleep(1.0)  # let the compositor settle
+        atomic = self.display_mgr.supports_atomic_switch()
+        if atomic:
+            # GNOME: one persistent configuration change, OLED-only → eInk-only,
+            # applied *through* the compositor so it keeps (and re-applies) our
+            # layout itself. The OLED goes dark now; the eInk shows the desktop
+            # as soon as the T-CON is powered in the next step.
+            self._set_busy_hint("Switching the desktop to the eInk output…")
+            self.log_message(f"Switching desktop to {self.DISPLAY_EINK} only (scale {p['scale']}"
+                             + (f", {rotation}" if rotation != 'normal' else "") + ")...")
+            if not self.display_mgr.set_sole_output(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation):
+                if theme_switched:
+                    self._set_theme(self.THEME_ADWAITA_DARK)
+                raise SwitchError(f"the desktop refused to switch to {self.DISPLAY_EINK}")
+            time.sleep(0.8)
+        else:
+            # Step 1: Enable E-Ink output first (overlapping the OLED)
+            self._set_busy_hint("Enabling the eInk output…")
+            self.log_message(f"Enabling E-Ink display on {self.DISPLAY_EINK} with {p['scale']}x scale"
+                             + (f", {rotation}" if rotation != 'normal' else "") + "...")
+            if not self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation):
+                rollback(f"could not enable {self.DISPLAY_EINK}")
+            self.log_message(f"✓ E-Ink display ({self.DISPLAY_EINK}) enabled with {p['scale']}x scale")
+            time.sleep(1.0)  # let the compositor settle
 
         # Step 2: Power the T-CON via the helper
         self._set_busy_hint("Powering the eInk panel…")
         if not self.execute_helper_command('enable-eink'):
+            if atomic:
+                self.log_message("⚠ T-CON failed — switching the desktop back to the OLED", level='warning')
+                self.display_mgr.set_sole_output(self.DISPLAY_OLED, scale=self.saved_oled_scale or 1.0)
+                if theme_switched:
+                    self._set_theme(self.THEME_ADWAITA_DARK)
+                raise SwitchError("the helper could not enable the eInk T-CON")
             rollback("the helper could not enable the eInk T-CON")
         self._ui(self._set_eink_on, True)
 
@@ -1876,18 +1898,19 @@ class EInkControlGUI:
             self.log_message("⚠ Failed to set dynamic mode", level='warning')
         time.sleep(0.5)
 
-        # Step 5: Turn the OLED off — the eInk is up, so this is safe now
-        self._set_busy_hint("Turning the OLED off…")
-        if self.display_mgr.disable_display(self.DISPLAY_OLED):
-            self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) disabled")
-        else:
-            self.log_message(f"⚠ Failed to disable OLED display on {self.DISPLAY_OLED}", level='warning')
+        if not atomic:
+            # Step 5: Turn the OLED off — the eInk is up, so this is safe now
+            self._set_busy_hint("Turning the OLED off…")
+            if self.display_mgr.disable_display(self.DISPLAY_OLED):
+                self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) disabled")
+            else:
+                self.log_message(f"⚠ Failed to disable OLED display on {self.DISPLAY_OLED}", level='warning')
 
-        # Step 5b: Re-apply the eInk config now that it is the sole output.
-        # On X11, overlapping two outputs at (0,0) with --panning can leave
-        # the panning viewport broken once the other output goes away.
-        time.sleep(0.3)
-        self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation)
+            # Step 5b: Re-apply the eInk config now that it is the sole output.
+            # On X11, overlapping two outputs at (0,0) with --panning can leave
+            # the panning viewport broken once the other output goes away.
+            time.sleep(0.3)
+            self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation)
 
         # Step 6: Touch input follows the eInk
         if self.display_mgr.map_touch_to_display(self.DISPLAY_EINK, rotation=rotation):
@@ -1954,22 +1977,30 @@ class EInkControlGUI:
         # Step 5: OLED back on, at its previous scale
         self._set_busy_hint("Turning the OLED on…")
         restore_scale = self.saved_oled_scale if self.saved_oled_scale else 1.0
-        oled_ok = self.display_mgr.enable_display(self.DISPLAY_OLED, scale=restore_scale)
-        if oled_ok:
-            self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) enabled with scale {restore_scale}")
-        else:
-            self.log_message(f"✗ Failed to enable OLED display on {self.DISPLAY_OLED}", level='error')
-        time.sleep(1.0)
-
-        if oled_ok:
-            # Step 6: eInk output off (refused automatically if it is the last one)
-            if self.display_mgr.disable_display(self.DISPLAY_EINK):
-                self.log_message(f"✓ E-Ink display ({self.DISPLAY_EINK}) disabled")
+        if self.display_mgr.supports_atomic_switch():
+            oled_ok = self.display_mgr.set_sole_output(self.DISPLAY_OLED, scale=restore_scale)
+            if oled_ok:
+                self.log_message(f"✓ Desktop switched back to {self.DISPLAY_OLED} only")
             else:
-                self.log_message(f"⚠ Failed to disable E-Ink display on {self.DISPLAY_EINK}", level='warning')
-            # Re-apply OLED config as sole output (same panning fix as the eInk path)
-            time.sleep(0.3)
-            self.display_mgr.enable_display(self.DISPLAY_OLED, scale=restore_scale)
+                self.log_message(f"✗ The desktop refused to switch back to {self.DISPLAY_OLED}", level='error')
+            time.sleep(0.8)
+        else:
+            oled_ok = self.display_mgr.enable_display(self.DISPLAY_OLED, scale=restore_scale)
+            if oled_ok:
+                self.log_message(f"✓ OLED display ({self.DISPLAY_OLED}) enabled with scale {restore_scale}")
+            else:
+                self.log_message(f"✗ Failed to enable OLED display on {self.DISPLAY_OLED}", level='error')
+            time.sleep(1.0)
+
+            if oled_ok:
+                # Step 6: eInk output off (refused automatically if it is the last one)
+                if self.display_mgr.disable_display(self.DISPLAY_EINK):
+                    self.log_message(f"✓ E-Ink display ({self.DISPLAY_EINK}) disabled")
+                else:
+                    self.log_message(f"⚠ Failed to disable E-Ink display on {self.DISPLAY_EINK}", level='warning')
+                # Re-apply OLED config as sole output (same panning fix as the eInk path)
+                time.sleep(0.3)
+                self.display_mgr.enable_display(self.DISPLAY_OLED, scale=restore_scale)
 
         # Step 7: Wake the OLED panel (the display change can blank it);
         # retry once since the blanking can arrive asynchronously.
@@ -2019,14 +2050,7 @@ class EInkControlGUI:
 
         self.log_message(f"⚠ Output state drifted after the switch ({active}={'on' if active_on else 'off'}, "
                          f"{inactive}={'on' if inactive_on else 'off'}) — correcting", level='warning')
-        if not active_on:
-            self.display_mgr.enable_display(active, scale=scale, rotation=rotation)
-            time.sleep(0.5)
-        if inactive_on:
-            # disable_display() refuses if it would be the last output
-            self.display_mgr.disable_display(inactive)
-            time.sleep(0.3)
-            self.display_mgr.enable_display(active, scale=scale, rotation=rotation)  # re-assert as sole output
+        self.display_mgr.set_sole_output(active, scale=scale, rotation=rotation)
         try:
             active_on = self.display_mgr.is_display_active(active)
             inactive_on = self.display_mgr.is_display_active(inactive)
@@ -2097,7 +2121,7 @@ class EInkControlGUI:
         rotation = p['reader_rotation'] if on else 'normal'
         if not already_rotated:
             self._set_busy_hint("Rotating the eInk…" if on else "Back to landscape…")
-            if not self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation):
+            if not self.display_mgr.set_sole_output(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation):
                 if on:
                     raise SwitchError(f"could not rotate {self.DISPLAY_EINK} to {rotation}")
                 self.log_message(f"⚠ Could not restore landscape on {self.DISPLAY_EINK}", level='warning')
@@ -2135,12 +2159,7 @@ class EInkControlGUI:
                 return
             self.log_message(f"Lid event: outputs changed (eInk={'on' if eink_on else 'off'} {rot_now or ''}, "
                              f"OLED={'on' if oled_on else 'off'}) — restoring reader layout", level='warning')
-            self.display_mgr.enable_display(self.DISPLAY_EINK, scale=self.display_scale, rotation=rotation)
-            time.sleep(0.5)
-            if self.display_mgr.is_display_active(self.DISPLAY_OLED):
-                self.display_mgr.disable_display(self.DISPLAY_OLED)
-                time.sleep(0.3)
-                self.display_mgr.enable_display(self.DISPLAY_EINK, scale=self.display_scale, rotation=rotation)
+            self.display_mgr.set_sole_output(self.DISPLAY_EINK, scale=self.display_scale, rotation=rotation)
             self.display_mgr.map_touch_to_display(self.DISPLAY_EINK, rotation=rotation)
             self.log_message("✓ Reader layout restored")
         except Exception as e:
@@ -2651,6 +2670,74 @@ class EInkControlGUI:
             self.log_message(f"Failed to open browser: {e}", level='error')
 
     # ------------------------------------------------------------------
+    # Layout watchdog
+    # ------------------------------------------------------------------
+
+    LAYOUT_WATCHDOG_S = 4.0        # poll interval (one `xrandr --query`, a few ms)
+    LAYOUT_WATCHDOG_CONFIRM = 2    # consecutive mismatches before correcting
+
+    def _start_layout_watchdog(self):
+        """GNOME has no stored monitor layout for this machine, so whenever it
+        reconfigures on its own (lid, hotplug, DPMS wake, settings) it falls
+        back to an *extended* desktop across both panels — long after our
+        switch finished. Watch the outputs while idle and put them back."""
+        self._layout_watchdog_stop = threading.Event()
+        self._layout_mismatches = 0
+        threading.Thread(target=self._layout_watchdog_loop, daemon=True, name='layout-watchdog').start()
+
+    def _expected_layout(self):
+        """(active, inactive, rotation) for the current state."""
+        if self._eink_on:
+            return (self.DISPLAY_EINK, self.DISPLAY_OLED,
+                    self._reader_rotation if self._reader_on else 'normal')
+        return (self.DISPLAY_OLED, self.DISPLAY_EINK, 'normal')
+
+    def _layout_watchdog_loop(self):
+        while not self._layout_watchdog_stop.wait(self.LAYOUT_WATCHDOG_S):
+            if (self._switching or self._closing or self._countdown_after is not None
+                    or self._connection_state != 'connected'
+                    or time.monotonic() - self._last_switch_done < 2 * self.LAYOUT_WATCHDOG_S):
+                self._layout_mismatches = 0
+                continue
+            try:
+                active, inactive, rotation = self._expected_layout()
+                ok = (self.display_mgr.is_display_active(active)
+                      and not self.display_mgr.is_display_active(inactive))
+            except Exception as e:
+                self.logger.debug(f"layout watchdog: {e}")
+                continue
+            if ok:
+                self._layout_mismatches = 0
+                continue
+            self._layout_mismatches += 1
+            if self._layout_mismatches < self.LAYOUT_WATCHDOG_CONFIRM:
+                continue
+            self._layout_mismatches = 0
+            self._correct_layout(active, inactive, rotation)
+
+    def _correct_layout(self, active, inactive, rotation):
+        """Worker: re-apply the expected output layout (under the display lock)."""
+        if not self._display_lock.acquire(timeout=10):
+            return
+        try:
+            if self._switching:
+                return
+            self.log_message(f"⚠ Desktop changed the display layout behind our back "
+                             f"({inactive} came on) — restoring {active}", level='warning')
+            scale = self.display_scale if active == self.DISPLAY_EINK else (self.saved_oled_scale or 1.0)
+            self.display_mgr.set_sole_output(active, scale=scale, rotation=rotation)
+            self.display_mgr.map_touch_to_display(active, rotation=rotation)
+            if (self.display_mgr.is_display_active(active)
+                    and not self.display_mgr.is_display_active(inactive)):
+                self.log_message(f"✓ Display layout restored ({active} only)")
+            else:
+                self.log_message("✗ Could not restore the display layout", level='error')
+        except Exception as e:
+            self.logger.error(f"layout correction failed: {e}")
+        finally:
+            self._display_lock.release()
+
+    # ------------------------------------------------------------------
     # Startup / resume checks
     # ------------------------------------------------------------------
 
@@ -2832,7 +2919,9 @@ class EInkControlGUI:
         self._finish_close()
 
     def _finish_close(self):
-        # Stop resume monitor
+        # Stop monitors
+        if hasattr(self, '_layout_watchdog_stop'):
+            self._layout_watchdog_stop.set()
         self._resume_monitor_stop.set()
         if self._glib_loop:
             try:

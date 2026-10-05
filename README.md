@@ -114,6 +114,8 @@ There are three ways to switch between OLED and eInk:
 
 The switching sequence:
 
+On GNOME (X11 and Wayland) the switch is a single configuration change applied through GNOME's own display service, so GNOME keeps the layout consistent with the app; a watchdog additionally restores the expected layout if the desktop changes it on its own (lid, hotplug, wake). On other desktops the steps below are applied with xrandr / kscreen.
+
 - **To eInk**: enables eDP-2, powers on the T-CON, enables the frontlight, sets dynamic mode, then disables eDP-1. If the eInk output or the T-CON cannot be enabled, the switch is rolled back and the OLED stays on. On Wayland, the eInk is placed at the same position as the OLED (mirror-like) to avoid a visible extended-desktop state during the transition.
 - **To OLED**: switches to dynamic mode, shows a privacy image on eInk (to clear sensitive content), powers off the T-CON, re-enables eDP-1, wakes the panel, then disables eDP-2. The OLED is re-enabled even if the T-CON step fails, and an output is never turned off while it is the only active one.
 

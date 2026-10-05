@@ -104,6 +104,33 @@ class DisplayManager:
         """Check if we should use Mutter (GNOME) Wayland backend."""
         return self.session_type == 'wayland' and self.desktop_env in ('gnome', 'unknown')
 
+    def _mutter_available(self):
+        """Is org.gnome.Mutter.DisplayConfig answering on the session bus? (cached)"""
+        if getattr(self, '_mutter_ok', None) is None:
+            state = self._mutter_get_current_state()
+            self._mutter_ok = bool(state and state.get('monitors'))
+            if self._mutter_ok:
+                self.logger.info("Mutter DisplayConfig available: layouts will be applied through GNOME")
+        return self._mutter_ok
+
+    def _use_mutter_apply(self):
+        """Apply layout changes through Mutter's DisplayConfig.
+
+        On GNOME this is true on Wayland *and* X11 (Mutter renders X11 via
+        RandR itself). Going through Mutter — persistently — means GNOME
+        stores the layout and re-applies ours on lid/hotplug events instead
+        of its default extended desktop, which is what raw xrandr changes
+        suffered from. Queries on X11 stay on xrandr (physical truth).
+        """
+        if self._use_mutter_wayland():
+            return True
+        return (self.session_type == 'x11' and self.desktop_env == 'gnome'
+                and self._mutter_available())
+
+    def supports_atomic_switch(self):
+        """True when set_sole_output() is a single compositor call (GNOME)."""
+        return self._use_mutter_apply()
+
     def get_displays(self):
         """Get list of connected displays."""
         if self._use_kde_wayland():
@@ -133,9 +160,32 @@ class DisplayManager:
             rotation = 'normal'
         if self._use_kde_wayland():
             return self._enable_display_kde(display_name, scale, rotation)
-        if self._use_mutter_wayland():
+        if self._use_mutter_apply():
             return self._enable_display_wayland(display_name, scale, rotation)
         return self._enable_display_x11(display_name, scale, rotation)
+
+    def set_sole_output(self, display_name, scale=None, rotation='normal'):
+        """Make display_name the only active output (scale/rotation applied).
+
+        GNOME: one persistent ApplyMonitorsConfig (Mutter rejects overlapping or
+        non-adjacent two-monitor layouts, and a single call cannot leave both
+        panels dark). Elsewhere: enable the target, disable the other, re-apply
+        the target as sole output.
+        """
+        if rotation not in self.ROTATIONS:
+            rotation = 'normal'
+        others = [c for c in (self.OLED_CONNECTOR, self.EINK_CONNECTOR) if c != display_name]
+        if self._use_mutter_apply():
+            return self._set_sole_output_mutter(display_name, scale, rotation)
+        if not self.enable_display(display_name, scale=scale, rotation=rotation):
+            return False
+        time.sleep(0.3)
+        for other in others:
+            if self.is_display_active(other):
+                self.disable_display(other)
+                time.sleep(0.3)
+                self.enable_display(display_name, scale=scale, rotation=rotation)
+        return self.is_display_active(display_name) and not any(self.is_display_active(o) for o in others)
 
     def get_display_rotation(self, display_name):
         """Current rotation of an active display ('normal' if unknown/inactive)."""
@@ -171,7 +221,7 @@ class DisplayManager:
             return False
         if self._use_kde_wayland():
             return self._disable_display_kde(display_name)
-        if self._use_mutter_wayland():
+        if self._use_mutter_apply():
             return self._disable_display_wayland(display_name)
         return self._disable_display_x11(display_name)
 
@@ -826,10 +876,13 @@ class DisplayManager:
                 'monitors': lm_mons,
             })
 
+        props = state[3] if len(state) > 3 else {}
         return {
             'serial': serial,
             'monitors': monitors,
             'logical_monitors': logical_monitors,
+            'layout_mode': int(props.get('layout-mode', 1)) if props else 1,   # 1 logical, 2 physical
+            'global_scale_required': bool(props.get('global-scale-required', False)) if props else False,
         }
 
     def _mutter_get_current_state_gdbus(self):
@@ -1020,11 +1073,7 @@ except Exception as e:
             self.logger.error(f"No modes available for {display_name}")
             return False
 
-        # Determine the Mutter scale
-        if scale is not None and scale != 1.0:
-            mutter_scale = self._best_scale(target_mode.get('supported_scales', [1.0]), scale)
-        else:
-            mutter_scale = target_mode.get('preferred_scale', 1.0)
+        mutter_scale = self._mutter_scale_for(state, target_mode, scale)
 
         self.logger.info(f"Wayland: enabling {display_name} mode={target_mode['width']}x{target_mode['height']}"
                         f"@{target_mode['refresh']:.1f}Hz scale={mutter_scale}")
@@ -1058,18 +1107,93 @@ except Exception as e:
                     'monitors': lm_monitors_spec,
                 })
 
-        # Place the new display at (0, 0) so it overlaps existing monitors
-        # (mirror-like). The OLED will be disabled shortly after, so this
-        # avoids a visible extended-desktop state on the eInk.
+        # Mutter rejects overlapping and non-adjacent logical monitors, so the
+        # new display goes right next to the existing ones (x = their total
+        # width, in the unit the layout mode uses). Use set_sole_output() for
+        # a direct OLED-only <-> eInk-only swap without an extended phase.
+        x = 0
+        for lc in logical_configs:
+            x = max(x, lc['x'] + self._logical_monitor_width(state, lc))
         logical_configs.append({
-            'x': 0, 'y': 0,
+            'x': x, 'y': 0,
             'scale': mutter_scale,
             'transform': self.MUTTER_TRANSFORM.get(rotation, 0),
-            'primary': False,
+            'primary': not logical_configs,
             'monitors': [(display_name, target_mode['id'], {})],
         })
 
         return self._mutter_apply_config(state['serial'], logical_configs)
+
+    def _mutter_scale_for(self, state, target_mode, scale):
+        """Pick the Mutter scale for a monitor.
+
+        GNOME applies one global scale on X11 ('global-scale-required'), so the
+        base is the scale already in use (e.g. 2 on this HiDPI OLED); our own
+        'display scale' setting multiplies it and the result snaps to a
+        supported value.
+        """
+        supported = target_mode.get('supported_scales') or [1.0]
+        base = None
+        for lm in state.get('logical_monitors', []):
+            base = lm.get('scale')
+            break
+        if base is None or not state.get('global_scale_required'):
+            base = target_mode.get('preferred_scale', 1.0) if base is None else base
+        requested = base * (scale if scale else 1.0)
+        chosen = self._best_scale(supported, requested)
+        if abs(chosen - requested) > 0.01:
+            self.logger.info(f"Mutter: scale {requested:.2f} not supported, using {chosen}")
+        return chosen
+
+    def _logical_monitor_width(self, state, lc):
+        """Width of a logical-monitor config in layout units (physical px or logical px)."""
+        width = 0
+        for ms in lc['monitors']:
+            connector = ms[0] if isinstance(ms, (tuple, list)) else ms['connector']
+            mon = self._find_monitor_in_state(state, connector)
+            if not mon:
+                continue
+            mode = next((m for m in mon['modes'] if m.get('is_current')), None) or (mon['modes'][0] if mon['modes'] else None)
+            if mode:
+                w, h = mode['width'], mode['height']
+                if lc.get('transform', 0) in (1, 3):
+                    w, h = h, w
+                width = max(width, w)
+        if state.get('layout_mode', 1) == 1 and lc.get('scale'):
+            width = int(round(width / lc['scale']))
+        return width
+
+    def _set_sole_output_mutter(self, display_name, scale, rotation):
+        """One persistent ApplyMonitorsConfig with display_name as the only monitor."""
+        state = self._mutter_get_current_state()
+        if not state:
+            self.logger.error("Mutter: could not read the current state")
+            return False
+        monitor = self._find_monitor_in_state(state, display_name)
+        if not monitor:
+            self.logger.error(f"Monitor {display_name} not found in Mutter state")
+            return False
+        target_mode = (next((m for m in monitor['modes'] if m.get('is_preferred')), None)
+                       or next((m for m in monitor['modes'] if m.get('is_current')), None)
+                       or (monitor['modes'][0] if monitor['modes'] else None))
+        if not target_mode:
+            self.logger.error(f"No modes available for {display_name}")
+            return False
+        mutter_scale = self._mutter_scale_for(state, target_mode, scale)
+        config = [{
+            'x': 0, 'y': 0,
+            'scale': mutter_scale,
+            'transform': self.MUTTER_TRANSFORM.get(rotation, 0),
+            'primary': True,
+            'monitors': [(display_name, target_mode['id'], {})],
+        }]
+        self.logger.info(f"Mutter: switching desktop to {display_name} only "
+                         f"(mode {target_mode['id']}, scale {mutter_scale}, rotation {rotation})")
+        ok = self._mutter_apply_config(state['serial'], config)
+        if ok:
+            time.sleep(0.5)
+            self.logger.info(f"Desktop now on {display_name} only")
+        return ok
 
     def _disable_display_wayland(self, display_name):
         """Disable a display via Mutter ApplyMonitorsConfig."""

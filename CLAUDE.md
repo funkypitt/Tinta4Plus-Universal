@@ -78,9 +78,15 @@ Uninstall: `sudo bash installer.sh --uninstall`
 
 ## Key design decisions
 
-### Display switching on Wayland (Mutter)
+### Display switching on GNOME (Mutter, X11 and Wayland)
 
-When enabling the eInk on Wayland, the display is placed at `(0, 0)` — overlapping the OLED — rather than extending to the right. This avoids a visible extended-desktop state (empty wallpaper without dock) during the brief period before the OLED is disabled.
+On GNOME, layouts are applied through `org.gnome.Mutter.DisplayConfig` on **X11 as well as Wayland** (`DisplayManager._use_mutter_apply()`; Mutter's X11 renderer is RandR). Mutter rejects overlapping and non-adjacent two-monitor layouts, so the switch is one *atomic, persistent* `ApplyMonitorsConfig` with the target as the sole monitor (`set_sole_output()`); the GUI uses it whenever `supports_atomic_switch()` is true (OLED-only → eInk-only, then T-CON on; on the way back privacy image, T-CON off, then eInk-only → OLED-only). `enable_display()` on Mutter places the new monitor adjacent (x = existing width in the layout mode's unit: physical px on this X11 session, `layout-mode` 2). `global-scale-required` means one scale for all monitors: the eInk gets the OLED's logical scale (2 here) × our display-scale setting, snapped to Mutter's supported values. Queries on X11 stay on xrandr. Raw xrandr changes made GNOME "forget" the layout and fall back to its default extended desktop (both panels, 5440 px wide) on the next lid/hotplug/DPMS event — that was the recurring "two screens on one" bug.
+
+Other desktops keep the stepwise xrandr/kscreen path (enable target, disable other, re-apply target).
+
+### Layout watchdog
+
+`_layout_watchdog_loop` (GUI, every 4 s while idle and connected) checks that exactly the expected output is active (eInk, rotated in reader mode, or OLED) and, after two consecutive mismatches, re-applies it with `set_sole_output()` and logs "Desktop changed the display layout behind our back". This catches reconfigurations GNOME performs long after a switch finished.
 
 ### Helper path resolution (`_resolve_helper_path()`)
 
