@@ -1917,6 +1917,7 @@ class EInkControlGUI:
             self.log_message(f"✓ Touchscreen mapped to {self.DISPLAY_EINK}")
         else:
             self.log_message("Could not map touchscreen (may auto-map)")
+        self._schedule_touch_remap(self.DISPLAY_EINK, rotation)
 
         self._ui(self._start_refresh_timer)
         self._ui(self._ensure_floating_button, p['floating_button'])
@@ -2128,6 +2129,7 @@ class EInkControlGUI:
             time.sleep(0.5)
             if self.display_mgr.map_touch_to_display(self.DISPLAY_EINK, rotation=rotation):
                 self.log_message(f"✓ Touch and pen mapped to {self.DISPLAY_EINK} ({rotation})")
+            self._schedule_touch_remap(self.DISPLAY_EINK, rotation)
 
         if on:
             if self.execute_helper_command('set-reading'):
@@ -2141,6 +2143,24 @@ class EInkControlGUI:
             if self.execute_helper_command('set-dynamic'):
                 self._eink_mode = 'dynamic'
             self._ui(self._apply_display_state)
+
+    def _schedule_touch_remap(self, display, rotation, delays=(4.0, 10.0)):
+        """Map digitizers again later: the eInk T-CON's input interfaces (and
+        GNOME's own input mapper) can show up after the first mapping."""
+        def remap(delay):
+            time.sleep(delay)
+            if self._closing or self._switching:
+                return
+            expected_active, _, expected_rotation = self._expected_layout()
+            if expected_active != display or expected_rotation != rotation:
+                return  # state moved on
+            try:
+                if self.display_mgr.map_touch_to_display(display, rotation=rotation):
+                    self.logger.info(f"Touch re-mapped to {display} ({rotation}) after {delay:.0f}s")
+            except Exception as e:
+                self.logger.warning(f"Touch re-map failed: {e}")
+        for d in delays:
+            threading.Thread(target=remap, args=(d,), daemon=True, name='touch-remap').start()
 
     def _reassert_reader_layout(self):
         """Worker thread: after a lid event the compositor may have re-enabled

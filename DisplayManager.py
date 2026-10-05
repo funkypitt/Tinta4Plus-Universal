@@ -1317,9 +1317,14 @@ except Exception as e:
             ], signature='iidub a(ssa{sv})'))
 
         try:
+            # method 1 = temporary. Persistent (2) makes gnome-shell show the
+            # "Keep these display settings?" dialog and revert after 20 s if
+            # nobody answers — fatal with the lid closed. GNOME keeps the last
+            # layout it stored (OLED-only, written once) as its own fallback;
+            # the GUI's layout watchdog covers the rest.
             iface.ApplyMonitorsConfig(
                 dbus.UInt32(serial),
-                dbus.UInt32(2),  # method=2 persistent
+                dbus.UInt32(1),
                 dbus.Array(dbus_logical, signature='(iiduba(ssa{sv}))'),
                 dbus.Dictionary({}, signature='sv'),
             )
@@ -1358,7 +1363,7 @@ except Exception as e:
                 '--dest', 'org.gnome.Mutter.DisplayConfig',
                 '--object-path', '/org/gnome/Mutter/DisplayConfig',
                 '--method', 'org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig',
-                str(serial), 'uint32 2', logical_str, '@a{sv} {}'
+                str(serial), 'uint32 1', logical_str, '@a{sv} {}'
             ]
 
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
@@ -1724,37 +1729,20 @@ except Exception as e:
                     continue
 
             devices = []
-            seen_ids = set()
-
-            # Pass 1: name-based matching (fast). Pen/stylus/eraser devices
-            # are absolute digitizers on the same panel and need the same map.
+            # Every slave pointer with absolute axes is a digitizer that must
+            # follow the active output: the OLED's Wacom finger/pen devices and
+            # the eInk's ITE T-CON interfaces (finger touch arrives on an
+            # interface the kernel only names "ITE T-CON" / "ITE T-CON
+            # UNKNOWN"). Touchpads are relative and stay out.
             for dev_id, name, lower in candidates:
                 if 'virtual core' in lower or 'xtest' in lower:
                     continue
-                is_touch = 'touch' in lower and 'touchpad' not in lower
-                is_pen = any(k in lower for k in ('stylus', 'eraser', ' pen ')) and self._has_abs_axes(dev_id)
-                # Also match ELAN digitizer devices (common on ThinkBooks)
-                is_elan_digitizer = ('elan' in lower and 'touchpad' not in lower
-                                     and 'fingerprint' not in lower and 'mouse' not in lower)
-                if is_touch or is_pen or is_elan_digitizer:
-                    if dev_id not in seen_ids:
-                        devices.append((dev_id, name))
-                        seen_ids.add(dev_id)
-
-            # Pass 2: type-based — check if remaining pointer devices have touch capability
-            if not devices:
-                self.logger.info("No touchscreen found by name, probing pointer devices for touch capability...")
-                for dev_id, name, lower in candidates:
-                    if dev_id in seen_ids:
-                        continue
-                    if 'slave  pointer' not in lower and 'slave pointer' not in lower:
-                        continue
-                    if 'touchpad' in lower or 'mouse' in lower or 'trackpoint' in lower:
-                        continue
-                    # Check if this device has absolute (touch) axes
-                    if self._has_abs_axes(dev_id):
-                        devices.append((dev_id, name))
-                        seen_ids.add(dev_id)
+                if 'slave  pointer' not in lower and 'slave pointer' not in lower:
+                    continue
+                if 'touchpad' in lower or 'trackpoint' in lower or 'fingerprint' in lower:
+                    continue
+                if self._has_abs_axes(dev_id):
+                    devices.append((dev_id, name))
 
             return devices
 
