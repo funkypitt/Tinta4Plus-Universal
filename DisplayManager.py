@@ -114,18 +114,17 @@ class DisplayManager:
         return self._mutter_ok
 
     def _use_mutter_apply(self):
-        """Apply layout changes through Mutter's DisplayConfig.
+        """Apply layout changes through Mutter's DisplayConfig (Wayland only).
 
-        On GNOME this is true on Wayland *and* X11 (Mutter renders X11 via
-        RandR itself). Going through Mutter — persistently — means GNOME
-        stores the layout and re-applies ours on lid/hotplug events instead
-        of its default extended desktop, which is what raw xrandr changes
-        suffered from. Queries on X11 stay on xrandr (physical truth).
+        Mutter's API works on X11 too, but it treats *both* eDP outputs as
+        laptop panels: with the lid closed it refuses to activate the eInk
+        ("Refusing to activate a closed laptop panel") and re-applies any
+        stored layout — which blanks the panel in the one posture this app
+        exists for. On X11 we therefore drive RandR directly (Mutter cannot
+        veto that) and never store a layout; the GUI's layout watchdog
+        handles GNOME's occasional fallback to an extended desktop.
         """
-        if self._use_mutter_wayland():
-            return True
-        return (self.session_type == 'x11' and self.desktop_env == 'gnome'
-                and self._mutter_available())
+        return self._use_mutter_wayland()
 
     def supports_atomic_switch(self):
         """True when set_sole_output() is a single compositor call (GNOME)."""
