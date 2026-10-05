@@ -49,11 +49,12 @@ HOTKEYS = {
     'KEY_HELP',
 }
 
-# Keys needed for Super+P combo
+# Keys needed for the Super+P / Super+Shift+P combos
 COMBO_KEYS = {
     'KEY_LEFTMETA',
     'KEY_P',
 }
+SHIFT_KEYS = ('KEY_LEFTSHIFT', 'KEY_RIGHTSHIFT')
 
 # Name prefix of the UInput mirrors this module creates
 FORWARDER_PREFIX = 'tinta4plusu-fwd-'
@@ -74,12 +75,14 @@ class GlobalHotkeyListener:
     """
 
     def __init__(self, logger, on_brightness_up=None, on_brightness_down=None,
-                 on_refresh=None, on_toggle=None):
+                 on_refresh=None, on_toggle=None, on_reader=None):
         self.logger = logger
         self.on_brightness_up = on_brightness_up
         self.on_brightness_down = on_brightness_down
         self.on_refresh = on_refresh
         self.on_toggle = on_toggle
+        self.on_reader = on_reader          # Super+Shift+P: tablet reader mode
+        self._shift_held = False
         self._running = False
         self._threads = []
         self._devices = []
@@ -224,6 +227,13 @@ class GlobalHotkeyListener:
         """
         code, value = event.code, event.value
 
+        # Shift is only tracked (never consumed) so Super+Shift+P can be told apart
+        if code in self._shift_codes():
+            if value == KEY_DOWN:
+                self._shift_held = True
+            elif value == KEY_UP:
+                self._shift_held = False
+
         # --- Super (left meta) ------------------------------------------
         if code == ecodes.KEY_LEFTMETA:
             if value == KEY_DOWN:
@@ -255,7 +265,10 @@ class GlobalHotkeyListener:
                 now = time.monotonic()
                 if now - self._last_toggle_time > TOGGLE_DEBOUNCE_S:
                     self._last_toggle_time = now
-                    if self.on_toggle:
+                    if self._shift_held and self.on_reader:
+                        self.logger.info("GlobalHotkeyListener: Super+Shift+P reader toggle detected")
+                        self._dispatch(self.on_reader)
+                    elif self.on_toggle:
                         self.logger.info("GlobalHotkeyListener: Super+P toggle detected")
                         self._dispatch(self.on_toggle)
             return True  # swallow down, repeat and up of P while Super is held
@@ -292,6 +305,10 @@ class GlobalHotkeyListener:
             self._swallowed.add(code)
             return True
         return False
+
+    @staticmethod
+    def _shift_codes():
+        return tuple(getattr(ecodes, k) for k in SHIFT_KEYS if hasattr(ecodes, k))
 
     def _flush_pending_super(self, ui):
         """Inject the held-back Super-down so the DE sees it."""

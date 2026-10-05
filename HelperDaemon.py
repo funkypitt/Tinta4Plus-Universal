@@ -156,6 +156,7 @@ class HelperDaemon:
             on_brightness_down=self._hotkey_brightness_down,
             on_refresh=self._hotkey_refresh,
             on_toggle=self._hotkey_toggle,
+            on_reader=self._hotkey_reader,
         )
 
         # Watchdog
@@ -463,6 +464,12 @@ class HelperDaemon:
         """
         self.logger.info("Hotkey: Super+P toggle requested")
         self._queue_notification({'type': 'toggle'})
+        return True
+
+    def _hotkey_reader(self):
+        """Handle Super+Shift+P: queue a tablet-reader-mode toggle for the GUI."""
+        self.logger.info("Hotkey: Super+Shift+P reader mode requested")
+        self._queue_notification({'type': 'reader'})
         return True
 
     # ------------------------------------------------------------------

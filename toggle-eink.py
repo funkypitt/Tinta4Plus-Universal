@@ -139,6 +139,16 @@ def switch_to_eink(helper, display_mgr, logger, scale, brightness):
 
 def switch_to_oled(helper, display_mgr, logger, privacy_image='random'):
     """Perform the full eInk → OLED switch sequence."""
+    # Reader mode may have left the eInk in portrait: go back to landscape
+    # first so the privacy image is shown upright.
+    try:
+        if display_mgr.get_display_rotation(DISPLAY_EINK) != 'normal':
+            logger.info("eInk is rotated (reader mode) — restoring landscape first")
+            display_mgr.enable_display(DISPLAY_EINK, rotation='normal')
+            display_mgr.map_touch_to_display(DISPLAY_EINK)
+            time.sleep(0.5)
+    except Exception as e:
+        logger.warning(f"Could not reset eInk rotation: {e}")
     # 1. Switch to dynamic mode for color privacy image
     helper.send_command('set-dynamic')
     time.sleep(0.5)

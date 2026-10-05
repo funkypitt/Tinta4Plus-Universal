@@ -30,6 +30,23 @@ class DisplayManager:
     OLED_CONNECTOR = "eDP-1"
     EINK_CONNECTOR = "eDP-2"
 
+    # Output rotations (xrandr vocabulary); 'left'/'right' are portrait
+    ROTATIONS = ('normal', 'left', 'right', 'inverted')
+    # xrandr rotation -> Mutter logical-monitor transform
+    MUTTER_TRANSFORM = {'normal': 0, 'left': 1, 'inverted': 2, 'right': 3}
+    # Touch "Coordinate Transformation Matrix" that rotates device space the
+    # same way the output is rotated (unit square -> unit square)
+    TOUCH_ROTATION_MATRIX = {
+        'normal':   (1, 0, 0, 0, 1, 0, 0, 0, 1),
+        'left':     (0, -1, 1, 1, 0, 0, 0, 0, 1),
+        'right':    (0, 1, 0, -1, 0, 1, 0, 0, 1),
+        'inverted': (-1, 0, 1, 0, -1, 1, 0, 0, 1),
+    }
+
+    @staticmethod
+    def is_portrait(rotation):
+        return rotation in ('left', 'right')
+
     def __init__(self, logger):
         self.logger = logger
         self.session_type = self._detect_session_type()
@@ -103,18 +120,42 @@ class DisplayManager:
             return self._is_display_active_wayland(display_name)
         return self._is_display_active_x11(display_name)
 
-    def enable_display(self, display_name, scale=None):
-        """Enable/turn on a display with optional scaling.
+    def enable_display(self, display_name, scale=None, rotation='normal'):
+        """Enable/turn on a display with optional scaling and rotation.
 
         Args:
             display_name: Name of the display (e.g., 'eDP-1', 'eDP-2')
             scale: Optional scale factor (e.g., 1.60 means UI appears 1.6x larger)
+            rotation: 'normal', 'left', 'right' or 'inverted' (xrandr names)
         """
+        if rotation not in self.ROTATIONS:
+            self.logger.warning(f"Unknown rotation {rotation!r}, using normal")
+            rotation = 'normal'
         if self._use_kde_wayland():
-            return self._enable_display_kde(display_name, scale)
+            return self._enable_display_kde(display_name, scale, rotation)
         if self._use_mutter_wayland():
-            return self._enable_display_wayland(display_name, scale)
-        return self._enable_display_x11(display_name, scale)
+            return self._enable_display_wayland(display_name, scale, rotation)
+        return self._enable_display_x11(display_name, scale, rotation)
+
+    def get_display_rotation(self, display_name):
+        """Current rotation of an active display ('normal' if unknown/inactive)."""
+        try:
+            if self._use_kde_wayland():
+                out = self._kscreen_find_output(display_name)
+                rot = (out or {}).get('rotation')
+                return rot if rot in self.ROTATIONS else 'normal'
+            if self._use_mutter_wayland():
+                state = self._mutter_get_current_state()
+                lm = self._find_logical_monitor(state, display_name) if state else None
+                if lm:
+                    for name, t in self.MUTTER_TRANSFORM.items():
+                        if t == lm.get('transform'):
+                            return name
+                return 'normal'
+            return self._get_display_rotation_x11(display_name)
+        except Exception as e:
+            self.logger.warning(f"Could not read rotation of {display_name}: {e}")
+            return 'normal'
 
     def disable_display(self, display_name):
         """Disable/turn off a display.
@@ -332,8 +373,8 @@ class DisplayManager:
             self.logger.error(f"Failed to check display status: {e}")
             return False
 
-    def _apply_xrandr_enable(self, display_name, scale=None):
-        """Build and run the xrandr command to enable a display. Returns (cmd, success)."""
+    def _apply_xrandr_enable(self, display_name, scale=None, rotation='normal'):
+        """Build and run the xrandr command to enable a display. Returns success."""
         if display_name == "eDP-1":
             native_width, native_height = self.OLED_RESOLUTION_WH
         elif display_name == "eDP-2":
@@ -342,23 +383,25 @@ class DisplayManager:
             self.logger.warning(f"Unknown display {display_name}, using auto mode")
             native_width, native_height = None, None
 
-        cmd = ['xrandr', '--output', display_name]
+        cmd = ['xrandr', '--output', display_name, '--rotate', rotation]
 
         if native_width and native_height:
             cmd.extend(['--mode', f'{native_width}x{native_height}'])
             cmd.extend(['--pos', '0x0'])
+            # The panning area is in screen space, so it follows the rotation
+            pan_w, pan_h = (native_height, native_width) if self.is_portrait(rotation) else (native_width, native_height)
 
             if scale is not None and scale != 1.0:
                 scale_inv = 1.0 / scale
-                panning_width = int(native_width * scale_inv)
-                panning_height = int(native_height * scale_inv)
+                panning_width = int(pan_w * scale_inv)
+                panning_height = int(pan_h * scale_inv)
                 cmd.extend(['--panning', f'{panning_width}x{panning_height}'])
                 cmd.extend(['--scale', f'{scale_inv}x{scale_inv}'])
                 self.logger.info(f"Scaling: virtual desktop {panning_width}x{panning_height}, "
                                f"xrandr scale {scale_inv:.3f}x{scale_inv:.3f} (our scale={scale}), "
-                               f"physical {native_width}x{native_height}")
+                               f"physical {native_width}x{native_height}, rotation {rotation}")
             else:
-                cmd.extend(['--panning', f'{native_width}x{native_height}'])
+                cmd.extend(['--panning', f'{pan_w}x{pan_h}'])
                 cmd.extend(['--scale', '1x1'])
         else:
             cmd.extend(['--auto', '--pos', '0x0'])
@@ -369,7 +412,7 @@ class DisplayManager:
 
         return result.returncode == 0
 
-    def _expected_x11_size(self, display_name, scale=None):
+    def _expected_x11_size(self, display_name, scale=None, rotation='normal'):
         """Size xrandr should report for a display enabled by _apply_xrandr_enable."""
         if display_name == self.OLED_CONNECTOR:
             native_w, native_h = self.OLED_RESOLUTION_WH
@@ -377,13 +420,15 @@ class DisplayManager:
             native_w, native_h = self.EINK_RESOLUTION_WH
         else:
             return None
+        if self.is_portrait(rotation):
+            native_w, native_h = native_h, native_w
         if scale is not None and scale != 1.0:
             # Same arithmetic as the --panning argument we pass to xrandr
             scale_inv = 1.0 / scale
             return int(native_w * scale_inv), int(native_h * scale_inv)
         return native_w, native_h
 
-    def _verify_display_state_x11(self, display_name, expect_active, scale=None):
+    def _verify_display_state_x11(self, display_name, expect_active, scale=None, rotation='normal'):
         """Verify that a display matches the expected active/inactive state.
 
         Returns True if the actual state matches expectations, False otherwise.
@@ -399,7 +444,7 @@ class DisplayManager:
 
         if expect_active:
             geometry = self._get_display_geometry_x11(display_name)
-            expected = self._expected_x11_size(display_name, scale)
+            expected = self._expected_x11_size(display_name, scale, rotation)
             if geometry and expected:
                 expected_w, expected_h = expected
                 actual_w, actual_h = geometry['width'], geometry['height']
@@ -423,10 +468,10 @@ class DisplayManager:
         except Exception as e:
             self.logger.warning(f"Reset to baseline failed: {e}")
 
-    def _enable_display_x11(self, display_name, scale=None):
-        """Enable a display using xrandr with optional scaling."""
+    def _enable_display_x11(self, display_name, scale=None, rotation='normal'):
+        """Enable a display using xrandr with optional scaling and rotation."""
         try:
-            self._apply_xrandr_enable(display_name, scale)
+            self._apply_xrandr_enable(display_name, scale, rotation)
 
             time.sleep(0.5)
 
@@ -441,15 +486,16 @@ class DisplayManager:
             time.sleep(0.3)
 
             # Verify the display state matches expectations
-            if self._verify_display_state_x11(display_name, expect_active=True, scale=scale):
+            if self._verify_display_state_x11(display_name, expect_active=True, scale=scale, rotation=rotation):
                 scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
-                self.logger.info(f"Enabled display: {display_name}{scale_info}")
+                rot_info = f", rotation {rotation}" if rotation != 'normal' else ""
+                self.logger.info(f"Enabled display: {display_name}{scale_info}{rot_info}")
                 return True
 
             # Verification failed — reset to baseline and retry once
             self.logger.warning(f"Display verification failed for {display_name}, retrying...")
             self._reset_display_to_native_baseline(display_name)
-            self._apply_xrandr_enable(display_name, scale)
+            self._apply_xrandr_enable(display_name, scale, rotation)
             time.sleep(0.8)
 
             try:
@@ -469,6 +515,34 @@ class DisplayManager:
         except Exception as e:
             self.logger.error(f"Failed to enable display: {e}")
             return False
+
+    def _get_display_rotation_x11(self, display_name):
+        """Parse the rotation of an output from `xrandr --query`.
+
+        Active outputs look like:
+            eDP-2 connected 1600x2560+0+0 left (normal left inverted right ...)
+        with the rotation word right after the geometry (absent when normal).
+        """
+        result = subprocess.run(['xrandr', '--query'], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.split('\n'):
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == display_name and parts[1] == 'connected':
+                for i, part in enumerate(parts):
+                    if 'x' in part and '+' in part:
+                        nxt = parts[i + 1] if i + 1 < len(parts) else ''
+                        return nxt if nxt in ('left', 'right', 'inverted') else 'normal'
+                return 'normal'
+        return 'normal'
+
+    def _get_screen_size_x11(self):
+        """Framebuffer size from the 'Screen 0: ... current W x H' line, or None."""
+        result = subprocess.run(['xrandr', '--query'], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.split('\n'):
+            if line.startswith('Screen') and 'current' in line:
+                after = line.split('current', 1)[1].split(',')[0]
+                w, _, h = after.replace(' ', '').partition('x')
+                return int(w), int(h)
+        return None
 
     def _disable_display_x11(self, display_name):
         """Disable a display using xrandr."""
@@ -896,12 +970,12 @@ except Exception as e:
 
         return self._find_logical_monitor(state, display_name) is not None
 
-    def _enable_display_wayland(self, display_name, scale=None):
+    def _enable_display_wayland(self, display_name, scale=None, rotation='normal'):
         """Enable a display via Mutter ApplyMonitorsConfig."""
         state = self._mutter_get_current_state()
         if not state:
             self.logger.warning("Wayland: could not query Mutter, falling back to X11")
-            return self._enable_display_x11(display_name, scale)
+            return self._enable_display_x11(display_name, scale, rotation)
 
         monitor = self._find_monitor_in_state(state, display_name)
         if not monitor:
@@ -964,7 +1038,7 @@ except Exception as e:
         logical_configs.append({
             'x': 0, 'y': 0,
             'scale': mutter_scale,
-            'transform': 0,
+            'transform': self.MUTTER_TRANSFORM.get(rotation, 0),
             'primary': False,
             'monitors': [(display_name, target_mode['id'], {})],
         })
@@ -1331,7 +1405,7 @@ except Exception as e:
             return False
         return out['enabled']
 
-    def _enable_display_kde(self, display_name, scale=None):
+    def _enable_display_kde(self, display_name, scale=None, rotation='normal'):
         """Enable a display via kscreen-doctor."""
         try:
             # Determine resolution
@@ -1349,6 +1423,7 @@ except Exception as e:
                 parts.append(f'output.{display_name}.mode.{res}')
             if scale is not None and scale != 1.0:
                 parts.append(f'output.{display_name}.scale.{scale}')
+            parts.append(f'output.{display_name}.rotation.{rotation}')
 
             cmd = ['kscreen-doctor'] + parts
             self.logger.info(f"KDE: enabling {display_name}: {' '.join(cmd)}")
@@ -1438,14 +1513,17 @@ except Exception as e:
     # Touchscreen input mapping
     # ------------------------------------------------------------------
 
-    def map_touch_to_display(self, display_name):
-        """Map all touchscreen input devices to the specified display.
+    def map_touch_to_display(self, display_name, rotation='normal'):
+        """Map all touchscreen (and pen) input devices to the specified display.
 
         This fixes misplaced touch coordinates on dual-screen setups
-        by remapping the touch digitizer to the active display output.
+        by remapping the digitizers to the active display output. With a
+        rotated output the touch coordinates are rotated to match (X11;
+        the Wayland compositors do this themselves).
 
         Args:
             display_name: Display connector name (e.g., 'eDP-1', 'eDP-2')
+            rotation: current rotation of that output
 
         Returns:
             bool: True if at least one device was mapped, False otherwise
@@ -1455,10 +1533,10 @@ except Exception as e:
         elif self._use_mutter_wayland():
             return self._map_touch_wayland_gnome(display_name)
         elif self.session_type == 'x11':
-            return self._map_touch_x11(display_name)
+            return self._map_touch_x11(display_name, rotation)
         else:
             self.logger.warning("Unknown session type, trying X11 touch mapping")
-            return self._map_touch_x11(display_name)
+            return self._map_touch_x11(display_name, rotation)
 
     def _get_touchscreen_xinput_ids(self):
         """Find touchscreen device IDs from xinput.
@@ -1494,12 +1572,17 @@ except Exception as e:
             devices = []
             seen_ids = set()
 
-            # Pass 1: name-based matching (fast)
+            # Pass 1: name-based matching (fast). Pen/stylus/eraser devices
+            # are absolute digitizers on the same panel and need the same map.
             for dev_id, name, lower in candidates:
+                if 'virtual core' in lower or 'xtest' in lower:
+                    continue
                 is_touch = 'touch' in lower and 'touchpad' not in lower
+                is_pen = any(k in lower for k in ('stylus', 'eraser', ' pen '))
                 # Also match ELAN digitizer devices (common on ThinkBooks)
-                is_elan_digitizer = 'elan' in lower and 'touchpad' not in lower and 'fingerprint' not in lower
-                if is_touch or is_elan_digitizer:
+                is_elan_digitizer = ('elan' in lower and 'touchpad' not in lower
+                                     and 'fingerprint' not in lower and 'mouse' not in lower)
+                if is_touch or is_pen or is_elan_digitizer:
                     if dev_id not in seen_ids:
                         devices.append((dev_id, name))
                         seen_ids.add(dev_id)
@@ -1532,22 +1615,58 @@ except Exception as e:
             self.logger.error(f"Failed to list xinput devices: {e}")
             return []
 
-    def _map_touch_x11(self, display_name):
-        """Map touchscreen devices to a display using xinput (X11)."""
+    def _touch_matrix_x11(self, display_name, rotation):
+        """Coordinate Transformation Matrix = (output area in screen space) x (rotation).
+
+        `xinput map-to-output` handles the area but ignores rotation, so for a
+        rotated output we compute the matrix ourselves.
+        """
+        rot = self.TOUCH_ROTATION_MATRIX[rotation]
+        geom = self._get_display_geometry_x11(display_name)
+        screen = self._get_screen_size_x11()
+        if not geom or not screen:
+            return rot
+        sw, sh = screen
+        area = (geom['width'] / sw, 0, geom['x'] / sw,
+                0, geom['height'] / sh, geom['y'] / sh,
+                0, 0, 1)
+        # 3x3 product area x rot
+        a, r = area, rot
+        return tuple(
+            sum(a[i * 3 + k] * r[k * 3 + j] for k in range(3))
+            for i in range(3) for j in range(3))
+
+    def _map_touch_x11(self, display_name, rotation='normal'):
+        """Map touch/pen devices to a display using xinput (X11), honouring rotation."""
         devices = self._get_touchscreen_xinput_ids()
         if not devices:
             self.logger.info("No touchscreen devices found via xinput")
             return False
 
+        matrix = None
+        if rotation != 'normal':
+            try:
+                matrix = self._touch_matrix_x11(display_name, rotation)
+            except Exception as e:
+                self.logger.warning(f"Could not compute touch matrix for {rotation}: {e}")
+
         mapped = False
         for dev_id, dev_name in devices:
             try:
-                result = subprocess.run(
-                    ['xinput', 'map-to-output', str(dev_id), display_name],
-                    capture_output=True, text=True, timeout=5
-                )
+                if matrix is None:
+                    result = subprocess.run(
+                        ['xinput', 'map-to-output', str(dev_id), display_name],
+                        capture_output=True, text=True, timeout=5
+                    )
+                else:
+                    result = subprocess.run(
+                        ['xinput', 'set-prop', str(dev_id), 'Coordinate Transformation Matrix']
+                        + [f'{v:.6f}' for v in matrix],
+                        capture_output=True, text=True, timeout=5
+                    )
                 if result.returncode == 0:
-                    self.logger.info(f"Mapped touch device '{dev_name}' (id={dev_id}) to {display_name}")
+                    self.logger.info(f"Mapped touch device '{dev_name}' (id={dev_id}) to {display_name}"
+                                     + (f" ({rotation})" if rotation != 'normal' else ""))
                     mapped = True
                 else:
                     self.logger.warning(f"Failed to map touch device '{dev_name}' (id={dev_id}): {result.stderr.strip()}")

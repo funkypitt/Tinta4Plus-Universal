@@ -34,7 +34,7 @@ class ResumeCheck:
     # ------------------------------------------------------------------
 
     def run(self, expect_eink=False, saved_oled_scale=None,
-            saved_keyboard_layout=None):
+            saved_keyboard_layout=None, eink_scale=None, eink_rotation='normal'):
         """Run all post-resume validation checks and apply fixes.
 
         Args:
@@ -43,11 +43,16 @@ class ResumeCheck:
             saved_oled_scale: Scale factor to restore on OLED (e.g. 1.75).
             saved_keyboard_layout: Layout string to restore (from
                                    DisplayManager.get_keyboard_layout()).
+            eink_scale: Scale to re-apply when the eInk has to be re-enabled.
+            eink_rotation: Rotation the eInk should have ('left'/'right' in
+                           reader mode); geometry checks and re-enables use it.
 
         Returns:
             list[str]: Human-readable log entries for each check/fix.
         """
         results = []
+        self._eink_scale = eink_scale
+        self._eink_rotation = eink_rotation if eink_rotation in self.dm.ROTATIONS else 'normal'
 
         # 1. Display state --------------------------------------------------
         oled_on = self.dm.is_display_active(self.dm.OLED_CONNECTOR)
@@ -94,7 +99,8 @@ class ResumeCheck:
         active_connector = (self.dm.EINK_CONNECTOR if expect_eink
                             else self.dm.OLED_CONNECTOR)
         try:
-            self.dm.map_touch_to_display(active_connector)
+            self.dm.map_touch_to_display(
+                active_connector, rotation=self._eink_rotation if expect_eink else 'normal')
             results.append(f"Touchscreen mapped to {active_connector}")
         except Exception as e:
             results.append(f"Warning: touch mapping failed: {e}")
@@ -126,7 +132,8 @@ class ResumeCheck:
         """No display is active — enable the expected one."""
         fixes = []
         if expect_eink:
-            self.dm.enable_display(self.dm.EINK_CONNECTOR)
+            self.dm.enable_display(self.dm.EINK_CONNECTOR, scale=self._eink_scale,
+                                   rotation=self._eink_rotation)
             fixes.append("Fixed: enabled eInk (no display was active)")
         else:
             scale = saved_oled_scale or 1.0
@@ -165,8 +172,10 @@ class ResumeCheck:
             self.logger.warning(
                 f"ResumeCheck: {connector} at offset "
                 f"({geom['x']},{geom['y']}), repositioning to (0,0)")
-            scale = None if expect_eink else (saved_oled_scale or 1.0)
-            self.dm.enable_display(connector, scale=scale)
+            if expect_eink:
+                self.dm.enable_display(connector, scale=self._eink_scale, rotation=self._eink_rotation)
+            else:
+                self.dm.enable_display(connector, scale=saved_oled_scale or 1.0)
             results.append(
                 f"Fixed: {connector} was at ({geom['x']},{geom['y']}), "
                 f"repositioned to (0,0)")
@@ -175,6 +184,8 @@ class ResumeCheck:
         # get_display_geometry returns logical (scaled) size, so we need to
         # account for scaling when comparing
         expected = self.EINK_RES if expect_eink else self.OLED_RES
+        if expect_eink and self.dm.is_portrait(self._eink_rotation):
+            expected = (expected[1], expected[0])
         scale = self.dm.get_display_scale(connector)
         if scale and scale > 0:
             logical_w = int(expected[0] / scale)

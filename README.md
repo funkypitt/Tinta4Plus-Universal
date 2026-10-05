@@ -116,6 +116,16 @@ The switching sequence:
 
 The switch runs in the background; the window stays responsive and shows progress under the button. Closing the window while eInk is active switches back to OLED first.
 
+### Tablet reader mode
+
+For reading long documents (a PDF magazine, a book) with the laptop closed and held like a tablet:
+
+1. Click **📖 Tablet reader mode** (or press **Super+Shift+P**). The app switches to eInk, rotates it to portrait (touch and pen follow), selects *Reading* mode and keeps the machine awake: closing the lid no longer suspends and the screen does not blank.
+2. Close the lid — the eInk now faces you — and read. If the desktop tries to re-enable the OLED or undo the rotation on the lid event, the app puts the reader layout back within a few seconds.
+3. Open the lid (or click **Leave tablet reader mode** / Super+Shift+P). The eInk goes back to landscape and *Dynamic* mode, the privacy image is shown upright, the T-CON is powered off and the OLED returns. Lid-close behaviour and auto-rotation are restored to what they were.
+
+Settings → *Tablet reader mode* lets you choose the orientation (portrait left / portrait right / landscape) and whether opening the lid leaves reader mode. Reader mode survives a GUI restart (the inhibitors are re-acquired) and a crash (the overridden GNOME lid settings are restored on the next start).
+
 ### eInk display modes
 
 - **Reading mode**: optimized for text, slower refresh, less ghosting.
@@ -145,6 +155,7 @@ These shortcuts work system-wide (via evdev in the helper daemon) whenever the d
 | Shortcut | Action | When |
 |----------|--------|------|
 | **Super+P** (Fn+F7) | Toggle eInk/OLED | Always (daemon running) |
+| **Super+Shift+P** | Tablet reader mode on/off | Always (daemon running) |
 | **Help** (Fn+F9) | Refresh eInk (clear ghosts) | eInk enabled |
 | **Brightness Up** (Fn+F6) | Increase frontlight brightness | eInk enabled |
 | **Brightness Down** (Fn+F5) | Decrease frontlight brightness | eInk enabled |

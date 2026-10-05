@@ -124,6 +124,7 @@ Image resolution in frozen mode uses `sys._MEIPASS` (PyInstaller `_internal/` di
 ### Keyboard shortcuts
 
 - **Super+P** (Fn+F7): Toggle eInk/OLED — always active when daemon is running. The listener grabs the keyboard device so the DE's display projection dialog is suppressed. 2-second debounce prevents rapid fire.
+- **Super+Shift+P**: Tablet reader mode on/off (listener tracks Shift state; Shift itself is forwarded)
 - **Help** (Fn+F9): Refresh eInk (clear ghosts) — only when eInk enabled
 - **XF86MonBrightnessUp** (Fn+F6): Increase frontlight brightness — only when eInk enabled
 - **XF86MonBrightnessDown** (Fn+F5): Decrease frontlight brightness — only when eInk enabled
@@ -133,6 +134,14 @@ These work both in the tkinter GUI (`bind_all`) and globally via `GlobalHotkeyLi
 ### OLED wake sequence
 
 When switching back to OLED, the app forces DPMS on (`xset dpms force on`; on Wayland deactivates `org.gnome.ScreenSaver` and `loginctl activate`s its own session). It deliberately never calls `loginctl unlock-session`: Super+P is handled by a root evdev listener and therefore fires from the lock screen, so unlocking here would bypass the lock screen.
+
+### Tablet reader mode
+
+`_enter_reader_sequence` = (enable eInk if needed) + `_apply_reader_layout(on=True)`: `enable_display(eDP-2, scale, rotation)`, `map_touch_to_display(eDP-2, rotation)` (X11 sets the *Coordinate Transformation Matrix* = output area × rotation; pen/stylus/eraser devices are mapped too), helper `set-reading`, then inhibitors: logind `handle-lid-switch` (block), `org.freedesktop.ScreenSaver.Inhibit` (idle), and on GNOME the gsettings `lid-close-{ac,battery}-action=nothing` + `orientation-lock=true` with the originals saved in the settings file (`reader_backup`) and restored on exit or on the next start after a crash. `reader_active` is persisted so a restarted GUI re-acquires the inhibitors.
+
+Leaving (`_leave_reader_sequence`, also what Super+P / the window close do while reading) = `_disable_eink_sequence`, which first calls `_apply_reader_layout(on=False)` so the eInk is landscape **before** the privacy image is drawn.
+
+Lid events come from UPower `PropertiesChanged(LidIsClosed)` on the resume-monitor D-Bus thread (`/proc/acpi/button/lid` in the poll fallback): closed → `_reassert_reader_layout()` 2.5 s later (Mutter treats both eDP outputs as laptop panels and may reconfigure on lid close); opened → `reader_off` if `reader_lid_open_exits`. `ResumeCheck.run(eink_rotation=...)` keeps the rotation across suspend. Hotkey: Super+Shift+P → daemon notification `{'type': 'reader'}`.
 
 ### Black-screen guards
 
@@ -169,7 +178,7 @@ When switching back to OLED, the app forces DPMS on (`xset dpms force on`; on Wa
 - GUI uses sv-ttk dark theme
 - GUI log: `~/.cache/Tinta4PlusU/gui.log` (rotating, 1 MB × 3) + console. Helper log: `/var/log/tinta4plusu-helper.log` (0644). Nothing is written to predictable `/tmp` paths except the socket.
 - Socket path: `/tmp/tinta4plusu.sock` (0600, owned by the launching user; peer-cred checked). Daemon lock/pid: `/run/lock/tinta4plusu-helper.lock`, `/run/tinta4plusu-helper.pid`.
-- Config dir: `~/.config/Tinta4PlusU` (`settings` JSON keys: display_scale, refresh_period, autoswitch_theme, flip_countdown, privacy_image, floating_button, text_size)
+- Config dir: `~/.config/Tinta4PlusU` (`settings` JSON keys: display_scale, refresh_period, autoswitch_theme, flip_countdown, privacy_image, floating_button, text_size, reader_rotation, reader_lid_open_exits, reader_active, reader_backup)
 - `HelperClient.disconnect(shutdown_helper=...)`: only the process that launched the daemon passes True.
 - `ECController` serialises every EC transaction with an RLock; `EInkUSBController` access is serialised by the daemon's `_usb_lock`.
 - Commit messages: imperative mood, concise summary line, details in body if needed

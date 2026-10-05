@@ -308,6 +308,15 @@ class EInkControlGUI:
     }
     BASE_WINDOW = (660, 900)
 
+    # Tablet reader mode: orientation presets (label -> xrandr rotation)
+    READER_ORIENTATIONS = {'Portrait (left)': 'left', 'Portrait (right)': 'right', 'Landscape': 'normal'}
+    # GNOME settings that would suspend / auto-rotate while reading with the lid closed
+    READER_GSETTINGS = [
+        ('org.gnome.settings-daemon.plugins.power', 'lid-close-ac-action', "'nothing'"),
+        ('org.gnome.settings-daemon.plugins.power', 'lid-close-battery-action', "'nothing'"),
+        ('org.gnome.settings-daemon.peripherals.touchscreen', 'orientation-lock', 'true'),
+    ]
+
     DEFAULT_SETTINGS = {
         'display_scale': 1.0,
         'refresh_period': 0,
@@ -316,6 +325,10 @@ class EInkControlGUI:
         'privacy_image': 'random',
         'floating_button': True,
         'text_size': 'Large',
+        'reader_rotation': 'left',       # eInk rotation in tablet reader mode
+        'reader_lid_open_exits': True,   # opening the lid leaves reader mode (-> OLED)
+        'reader_active': False,          # persisted so a restart knows we are reading
+        'reader_backup': None,           # gsettings values to restore after reader mode
     }
 
     def __init__(self, root, HELPER_SCRIPT, logger, autostart=False, ui_preview=False):
@@ -363,6 +376,12 @@ class EInkControlGUI:
         self._display_lock = threading.Lock()
         self._last_switch_done = 0.0
         self._eink_mode = None           # 'dynamic' | 'reading' | None
+        self._reader_on = False          # tablet reader mode active (thread-safe mirror)
+        self._reader_rotation = 'left'
+        self._lid_inhibit_fd = None      # logind handle-lid-switch inhibitor
+        self._idle_inhibit_cookie = None # org.freedesktop.ScreenSaver inhibitor
+        self._lid_closed = None
+        self._lid_reassert_timer = None
         self._closing = False
         self._startup_check_done = False
         self._secure_boot_dialog_shown = False
@@ -390,6 +409,10 @@ class EInkControlGUI:
         settings = self.load_settings()
         self.display_scale = settings['display_scale']
         self.flip_countdown = int(settings['flip_countdown'])
+        self._reader_rotation = settings['reader_rotation'] if settings['reader_rotation'] in DisplayManager.ROTATIONS else 'left'
+        self._reader_lid_open_exits = bool(settings['reader_lid_open_exits'])
+        self._reader_was_active = bool(settings['reader_active'])
+        self._reader_backup = settings['reader_backup'] if isinstance(settings['reader_backup'], dict) else None
 
         # Build UI
         self._thumbnail_cache = {}
@@ -402,6 +425,9 @@ class EInkControlGUI:
         self.autoswitch_theme_var.set(bool(settings['autoswitch_theme']))
         self.floating_button_var.set(bool(settings['floating_button']))
         self.text_size_var.set(self.text_size)
+        self.reader_orientation_var.set(next((k for k, v in self.READER_ORIENTATIONS.items()
+                                              if v == self._reader_rotation), 'Portrait (left)'))
+        self.reader_lid_var.set(self._reader_lid_open_exits)
         self.countdown_var.set(self.flip_countdown)
         self._set_privacy_image_selection(settings['privacy_image'])
         self._apply_display_state()
@@ -488,6 +514,10 @@ class EInkControlGUI:
                 'privacy_image': self._privacy_image_setting(),
                 'floating_button': bool(self.floating_button_var.get()),
                 'text_size': self.text_size,
+                'reader_rotation': self._reader_rotation,
+                'reader_lid_open_exits': bool(self.reader_lid_var.get()),
+                'reader_active': bool(self._reader_on),
+                'reader_backup': self._reader_backup,
             }
             tmp = self.SETTINGS_FILE + '.tmp'
             with open(tmp, 'w') as f:
@@ -669,6 +699,12 @@ class EInkControlGUI:
         self.switch_hint = ttk.Label(display_card, text="", style='Small.TLabel', anchor='w',
                                      wraplength=580, justify='left')
         self.switch_hint.grid(row=2, column=0, sticky='ew', pady=(8, 0))
+
+        self.reader_btn = ttk.Button(display_card, text="📖  Tablet reader mode", command=self.on_reader_toggled)
+        self.reader_btn.grid(row=4, column=0, sticky='ew', pady=(10, 0))
+        Tooltip(self.reader_btn, "Switch to eInk in portrait with reading mode, and keep the laptop awake\n"
+                                 "with the lid closed so you can read it like a tablet.\n"
+                                 "Also: Super+Shift+P. Opening the lid brings the OLED back.")
 
         self.connect_btn = ttk.Button(display_card, text="Connect to helper",
                                       command=self.initialize_helper)
@@ -899,8 +935,34 @@ class EInkControlGUI:
         Tooltip(self.floating_button_checkbox, "A small always-on-top ⟳ button you can drag anywhere (X11 only).")
         row += 1
 
+        # Tablet reader mode
+        ttk.Separator(tab).grid(row=row, column=0, columnspan=2, sticky='ew', pady=12)
+        row += 1
+        ttk.Label(tab, text="Tablet reader mode", style='H2.TLabel').grid(row=row, column=0, columnspan=2, sticky='w')
+        row += 1
+        ttk.Label(tab, text="Orientation").grid(row=row, column=0, sticky='w', padx=(0, 12), pady=(8, 0))
+        self.reader_orientation_var = tk.StringVar(value='Portrait (left)')
+        self.reader_orientation_combo = ttk.Combobox(tab, textvariable=self.reader_orientation_var, width=16,
+                                                     values=list(self.READER_ORIENTATIONS), state='readonly')
+        self.reader_orientation_combo.grid(row=row, column=1, sticky='w', pady=(8, 0))
+        self.reader_orientation_combo.bind('<<ComboboxSelected>>', self.on_reader_orientation_changed)
+        Tooltip(self.reader_orientation_combo, "How the eInk is rotated while reading. Touch and pen follow the rotation.")
+        row += 1
+        self.reader_lid_var = tk.BooleanVar(value=True)
+        self.reader_lid_checkbox = ttk.Checkbutton(
+            tab, text="Opening the lid leaves reader mode (back to OLED)", style=switch_style,
+            variable=self.reader_lid_var, command=self.save_settings)
+        self.reader_lid_checkbox.grid(row=row, column=0, columnspan=2, sticky='w', pady=(6, 0))
+        row += 1
+        ttk.Label(tab, text="While reading, closing the lid does not suspend and the screen does not blank; "
+                            "both are restored when you leave reader mode.",
+                  style='Small.TLabel', wraplength=560, justify='left').grid(row=row, column=0, columnspan=2, sticky='w', pady=(4, 0))
+        row += 1
+        ttk.Separator(tab).grid(row=row, column=0, columnspan=2, sticky='ew', pady=12)
+        row += 1
+
         # Text size
-        ttk.Label(tab, text="Text size").grid(row=row, column=0, sticky='w', padx=(0, 12), pady=(12, 0))
+        ttk.Label(tab, text="Text size").grid(row=row, column=0, sticky='w', padx=(0, 12), pady=(0, 0))
         size_row = ttk.Frame(tab)
         size_row.grid(row=row, column=1, sticky='w', pady=(12, 0))
         self.text_size_var = tk.StringVar(value='Large')
@@ -918,6 +980,7 @@ class EInkControlGUI:
         row += 1
         shortcuts = [
             ("Super+P  (Fn+F7)", "Switch between OLED and eInk — works system-wide while the helper runs"),
+            ("Super+Shift+P", "Tablet reader mode on / off"),
             ("Help  (Fn+F9)", "Full eInk refresh"),
             ("Fn+F5 / Fn+F6", "Frontlight down / up (eInk only; OLED brightness otherwise)"),
             ("Esc", "Cancel a running countdown (this window)"),
@@ -1102,7 +1165,10 @@ class EInkControlGUI:
         busy = self._switching or self._countdown_after is not None
 
         # Active display indicator + title
-        if on:
+        if on and self._reader_on:
+            self.display_chip.set("eInk · reader", Palette.OK)
+            self.root.title("ThinkBook E-Ink Control — reader mode")
+        elif on:
             self.display_chip.set("eInk", Palette.OK)
             self.root.title("ThinkBook E-Ink Control — eInk")
         else:
@@ -1124,10 +1190,16 @@ class EInkControlGUI:
             self.switch_hint.config(text="Connect to the helper to switch displays.")
         elif busy:
             pass  # hint is driven by the countdown / switch sequence
+        elif on and self._reader_on:
+            self.switch_hint.config(text="Reader mode: close the lid and read. Open it (or press the button) to come back.")
         elif on:
             self.switch_hint.config(text="Flip the lid back to the OLED side before switching.")
         else:
             self.switch_hint.config(text="You will have a few seconds to flip the lid to the eInk side.")
+
+        self.reader_btn.config(
+            text="📖  Leave tablet reader mode" if self._reader_on else "📖  Tablet reader mode",
+            state='normal' if (connected and not busy) else 'disabled')
 
         # eInk card
         eink_ctl = 'normal' if (on and connected and not busy) else 'disabled'
@@ -1272,6 +1344,19 @@ class EInkControlGUI:
             if self.floating_button_var.get():
                 self._ensure_floating_button(True)
             self._start_refresh_timer()
+            if self._reader_was_active:
+                # We were reading when the GUI last ran: pick the mode back up
+                # (inhibitors are per-process and must be re-acquired).
+                self.log_message("Resuming tablet reader mode from the previous session")
+                self._reader_on = True
+                self._acquire_reader_inhibitors()
+                self._apply_display_state()
+        elif self._reader_was_active or self._reader_backup:
+            # Reader mode ended without us (crash / power loss): undo its side effects
+            self._reader_on = False
+            self._restore_reader_system_prefs()
+            self.save_settings()
+        self._reader_was_active = False
 
         level = response.get('brightness_level')
         if level is not None:
@@ -1344,8 +1429,12 @@ class EInkControlGUI:
     def _process_notifications(self, notifs):
         """Process hotkey notifications on the main thread (toggles coalesced)."""
         toggle_requested = False
+        reader_requested = False
         for notif in notifs:
             ntype = notif.get('type')
+            if ntype == 'reader':
+                reader_requested = True
+                continue
             if ntype == 'brightness':
                 level = notif.get('level')
                 if level is not None:
@@ -1365,6 +1454,14 @@ class EInkControlGUI:
                 self.log_message("Ignoring toggle: a switch just finished", level='warning')
             else:
                 self.on_eink_toggled(skip_countdown=True)
+        elif reader_requested:
+            self.log_message("Hotkey: Super+Shift+P reader mode requested")
+            if self._switching or self._countdown_after is not None:
+                self.log_message("Ignoring: a switch is already in progress", level='warning')
+            elif time.monotonic() - self._last_switch_done < self.TOGGLE_COOLDOWN_S:
+                self.log_message("Ignoring: a switch just finished", level='warning')
+            else:
+                self.on_reader_toggled()
 
     def check_ec_status(self):
         """Check EC access status and gate the frontlight controls accordingly."""
@@ -1502,34 +1599,49 @@ class EInkControlGUI:
         self._apply_display_state()
         return True
 
-    def _start_switch(self):
-        """Snapshot UI state and run the switch sequence on a worker thread."""
-        if self._switching:
-            return
-        self._switching = True
-        self._apply_display_state()
-        target_on = not self._eink_on
-        params = {
+    def _snapshot_params(self):
+        """UI values the worker needs (read on the main thread only)."""
+        return {
             'scale': self.display_scale,
             'brightness': int(self.brightness_var.get()),
             'autoswitch_theme': bool(self.autoswitch_theme_var.get()),
             'privacy_image': self._pick_privacy_image(),
             'floating_button': bool(self.floating_button_var.get()),
+            'reader_rotation': self._reader_rotation,
         }
-        self.update_status("Switching to eInk…" if target_on else "Switching to OLED…")
-        threading.Thread(target=self._switch_worker, args=(target_on, params),
+
+    SWITCH_LABELS = {'eink': 'eInk', 'oled': 'OLED', 'reader_on': 'reader mode', 'reader_off': 'OLED (leaving reader mode)'}
+
+    def _start_switch(self, kind=None):
+        """Snapshot UI state and run a switch sequence on a worker thread.
+
+        kind: 'eink' | 'oled' | 'reader_on' | 'reader_off' (default: toggle eInk/OLED)
+        """
+        if self._switching:
+            return
+        if kind is None:
+            kind = 'oled' if self._eink_on else 'eink'
+        self._switching = True
+        self._apply_display_state()
+        params = self._snapshot_params()
+        self.update_status(f"Switching to {self.SWITCH_LABELS[kind]}…")
+        threading.Thread(target=self._switch_worker, args=(kind, params),
                          daemon=True, name='display-switch').start()
 
-    def _switch_worker(self, target_on, params):
+    def _switch_worker(self, kind, params):
         error = None
         if not self._display_lock.acquire(timeout=60):
             error = "another display operation is still running"
         else:
             try:
-                if target_on:
+                if kind == 'eink':
                     self._enable_eink_sequence(params)
-                else:
+                elif kind == 'oled':
                     self._disable_eink_sequence(params)
+                elif kind == 'reader_on':
+                    self._enter_reader_sequence(params)
+                elif kind == 'reader_off':
+                    self._leave_reader_sequence(params)
             except SwitchError as e:
                 error = str(e)
             except Exception as e:
@@ -1538,20 +1650,23 @@ class EInkControlGUI:
             finally:
                 self._uninhibit_sleep()
                 self._display_lock.release()
-        self._ui(self._switch_finished, target_on, error)
+        self._ui(self._switch_finished, kind, error)
 
-    def _switch_finished(self, target_on, error):
+    def _switch_finished(self, kind, error):
         """Main thread: close out a switch."""
         self._switching = False
         self._last_switch_done = time.monotonic()
         if error:
-            self.log_message(f"✗ Switch to {'eInk' if target_on else 'OLED'} failed: {error}", level='error')
+            self.log_message(f"✗ Switch to {self.SWITCH_LABELS[kind]} failed: {error}", level='error')
             self.update_status(f"Switch failed — {error}", error=True)
             # Our idea of the state may be stale; ask the daemon
             if self.helper.is_connected():
                 self._sync_state_from_helper()
+        elif self._reader_on:
+            self.update_status("Reader mode — close the lid and read")
         else:
             self.update_status("eInk display active" if self._eink_on else "OLED display active")
+        self.save_settings()  # persists reader_active
         self._apply_display_state()
         if self._closing:
             self._finish_close()
@@ -1655,6 +1770,11 @@ class EInkControlGUI:
         """Worker thread: eInk → OLED. The OLED is always brought back."""
         self.log_message("Preparing to disable E-Ink display...")
         self._inhibit_sleep()
+
+        if self._reader_on:
+            # Landscape first so the privacy image is shown upright, and
+            # release the lid/idle inhibitors.
+            self._apply_reader_layout(p, on=False)
 
         self._ui(self._stop_refresh_timer)
         self._ui(self._ensure_floating_button, False)
@@ -1780,6 +1900,199 @@ class EInkControlGUI:
         else:
             self.log_message(f"✗ Output state still wrong after correction ({active}={'on' if active_on else 'off'}, "
                              f"{inactive}={'on' if inactive_on else 'off'})", level='error')
+
+    # --- tablet reader mode -----------------------------------------------
+
+    def _enter_reader_sequence(self, p):
+        """Worker thread: (OLED →) eInk, rotated, reading mode, lid-safe."""
+        if not self._eink_on:
+            self._enable_eink_sequence(p)
+        self._apply_reader_layout(p, on=True)
+        self.log_message("✓ Tablet reader mode on — close the lid and read")
+
+    def _leave_reader_sequence(self, p):
+        """Worker thread: back to landscape/dynamic, then to the OLED."""
+        self._disable_eink_sequence(p)   # undoes the reader layout first
+        self.log_message("✓ Tablet reader mode off")
+
+    def _apply_reader_layout(self, p, on):
+        """Worker thread: rotate the eInk, map touch, set the eInk mode, inhibitors."""
+        rotation = p['reader_rotation'] if on else 'normal'
+        self._set_busy_hint("Rotating the eInk…" if on else "Back to landscape…")
+        if not self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation):
+            if on:
+                raise SwitchError(f"could not rotate {self.DISPLAY_EINK} to {rotation}")
+            self.log_message(f"⚠ Could not restore landscape on {self.DISPLAY_EINK}", level='warning')
+        time.sleep(0.5)
+        if self.display_mgr.map_touch_to_display(self.DISPLAY_EINK, rotation=rotation):
+            self.log_message(f"✓ Touch and pen mapped to {self.DISPLAY_EINK} ({rotation})")
+
+        if on:
+            if self.execute_helper_command('set-reading'):
+                self._eink_mode = 'reading'
+            self._reader_on = True
+            self._acquire_reader_inhibitors()
+            # Lid may already be closed when entering from a hotkey
+            self._ui(self._apply_display_state)
+        else:
+            self._release_reader_inhibitors()
+            self._reader_on = False
+            if self.execute_helper_command('set-dynamic'):
+                self._eink_mode = 'dynamic'
+            self._ui(self._apply_display_state)
+
+    def _reassert_reader_layout(self):
+        """Worker thread: after a lid event the compositor may have re-enabled
+        the OLED or dropped the rotation; put the reader layout back."""
+        if not self._display_lock.acquire(timeout=60):
+            return
+        try:
+            if not self._reader_on:
+                return
+            rotation = self._reader_rotation
+            eink_on = self.display_mgr.is_display_active(self.DISPLAY_EINK)
+            oled_on = self.display_mgr.is_display_active(self.DISPLAY_OLED)
+            rot_now = self.display_mgr.get_display_rotation(self.DISPLAY_EINK) if eink_on else None
+            if eink_on and not oled_on and rot_now == rotation:
+                self.logger.info("Lid event: reader layout intact")
+                return
+            self.log_message(f"Lid event: outputs changed (eInk={'on' if eink_on else 'off'} {rot_now or ''}, "
+                             f"OLED={'on' if oled_on else 'off'}) — restoring reader layout", level='warning')
+            self.display_mgr.enable_display(self.DISPLAY_EINK, scale=self.display_scale, rotation=rotation)
+            time.sleep(0.5)
+            if self.display_mgr.is_display_active(self.DISPLAY_OLED):
+                self.display_mgr.disable_display(self.DISPLAY_OLED)
+                time.sleep(0.3)
+                self.display_mgr.enable_display(self.DISPLAY_EINK, scale=self.display_scale, rotation=rotation)
+            self.display_mgr.map_touch_to_display(self.DISPLAY_EINK, rotation=rotation)
+            self.log_message("✓ Reader layout restored")
+        except Exception as e:
+            self.logger.error(f"Reader layout re-assert failed: {e}")
+        finally:
+            self._display_lock.release()
+
+    # Inhibitors and desktop preferences for reading with the lid closed
+
+    def _acquire_reader_inhibitors(self):
+        self._apply_reader_system_prefs()
+        if self._lid_inhibit_fd is None:
+            try:
+                import dbus
+                bus = dbus.SystemBus()
+                mgr = dbus.Interface(bus.get_object('org.freedesktop.login1', '/org/freedesktop/login1'),
+                                     'org.freedesktop.login1.Manager')
+                fd = mgr.Inhibit('handle-lid-switch', 'Tinta4PlusU',
+                                 'Reading on the eInk with the lid closed', 'block')
+                self._lid_inhibit_fd = fd.take()
+                self.logger.info("Acquired lid-switch inhibitor")
+            except Exception as e:
+                self.log_message(f"⚠ Could not inhibit lid-switch handling: {e}", level='warning')
+        if self._idle_inhibit_cookie is None:
+            try:
+                import dbus
+                bus = dbus.SessionBus()
+                ss = dbus.Interface(bus.get_object('org.freedesktop.ScreenSaver', '/org/freedesktop/ScreenSaver'),
+                                    'org.freedesktop.ScreenSaver')
+                self._idle_inhibit_cookie = int(ss.Inhibit('Tinta4PlusU', 'Reading on the eInk'))
+                self.logger.info("Acquired idle/screensaver inhibitor")
+            except Exception as e:
+                self.logger.warning(f"Could not inhibit idle blanking: {e}")
+
+    def _release_reader_inhibitors(self):
+        if self._lid_inhibit_fd is not None:
+            try:
+                os.close(self._lid_inhibit_fd)
+            except OSError:
+                pass
+            self._lid_inhibit_fd = None
+            self.logger.info("Released lid-switch inhibitor")
+        if self._idle_inhibit_cookie is not None:
+            try:
+                import dbus
+                bus = dbus.SessionBus()
+                ss = dbus.Interface(bus.get_object('org.freedesktop.ScreenSaver', '/org/freedesktop/ScreenSaver'),
+                                    'org.freedesktop.ScreenSaver')
+                ss.UnInhibit(self._idle_inhibit_cookie)
+            except Exception as e:
+                self.logger.warning(f"Could not release idle inhibitor: {e}")
+            self._idle_inhibit_cookie = None
+        self._restore_reader_system_prefs()
+
+    def _apply_reader_system_prefs(self):
+        """GNOME: don't suspend on lid close, don't auto-rotate. Originals are
+        kept in the settings file so they survive a crash."""
+        if self.display_mgr.desktop_env not in ('gnome', 'cinnamon') or self._reader_backup:
+            return
+        backup = {}
+        for schema, key, value in self.READER_GSETTINGS:
+            try:
+                cur = subprocess.run(['gsettings', 'get', schema, key], capture_output=True, text=True, timeout=5)
+                if cur.returncode != 0:
+                    continue
+                backup[f"{schema} {key}"] = cur.stdout.strip()
+                subprocess.run(['gsettings', 'set', schema, key, value], capture_output=True, timeout=5)
+            except Exception as e:
+                self.logger.warning(f"gsettings {schema} {key}: {e}")
+        if backup:
+            self._reader_backup = backup
+            self.save_settings()
+            self.logger.info(f"Reader mode: desktop prefs overridden ({len(backup)} keys)")
+
+    def _restore_reader_system_prefs(self):
+        if not self._reader_backup:
+            return
+        for schema_key, value in self._reader_backup.items():
+            schema, _, key = schema_key.partition(' ')
+            try:
+                subprocess.run(['gsettings', 'set', schema, key, value], capture_output=True, timeout=5)
+            except Exception as e:
+                self.logger.warning(f"gsettings restore {schema_key}: {e}")
+        self.logger.info("Reader mode: desktop prefs restored")
+        self._reader_backup = None
+        self.save_settings()
+
+    # Lid events (from the resume-monitor thread)
+
+    def _on_lid_changed(self, closed):
+        if closed == self._lid_closed:
+            return
+        self._lid_closed = closed
+        if not self._reader_on:
+            return
+        self.logger.info(f"Lid {'closed' if closed else 'opened'} in reader mode")
+        if closed:
+            # Give the compositor a moment to do whatever it does on lid close, then undo it
+            threading.Timer(2.5, self._reassert_reader_layout).start()
+        elif self._reader_lid_open_exits:
+            self._ui(self._lid_opened_leave_reader)
+
+    def _lid_opened_leave_reader(self):
+        if not self._reader_on or self._switching or self._closing:
+            return
+        self._cancel_countdown()
+        self.log_message("Lid opened — leaving tablet reader mode")
+        self._start_switch('reader_off')
+
+    def on_reader_toggled(self):
+        """Reader button / Super+Shift+P."""
+        if self._switching:
+            self.log_message("Switch already in progress...", level='warning')
+            return
+        self._cancel_countdown()
+        if self._connection_state != 'connected':
+            self.log_message("Cannot start reader mode: helper not connected", level='warning')
+            return
+        self._start_switch('reader_off' if self._reader_on else 'reader_on')
+
+    def on_reader_orientation_changed(self, _event=None):
+        rotation = self.READER_ORIENTATIONS.get(self.reader_orientation_var.get(), 'left')
+        if rotation == self._reader_rotation:
+            return
+        self._reader_rotation = rotation
+        self.log_message(f"Reader orientation: {self.reader_orientation_var.get()}")
+        self.save_settings()
+        if self._reader_on and not self._switching:
+            threading.Thread(target=self._reassert_reader_layout, daemon=True, name='reader-rotate').start()
 
     def _set_theme(self, theme):
         """Apply a desktop theme; never let a theme failure abort a switch."""
@@ -2086,7 +2399,9 @@ class EInkControlGUI:
             results = checker.run(
                 expect_eink=expect_eink,
                 saved_oled_scale=self.saved_oled_scale,
-                saved_keyboard_layout=self.saved_keyboard_layout)
+                saved_keyboard_layout=self.saved_keyboard_layout,
+                eink_scale=self.display_scale,
+                eink_rotation=self._reader_rotation if self._reader_on else 'normal')
             summary = "; ".join(r for r in results
                                 if r.startswith("Fixed:") or r.startswith("Warning:"))
             if summary:
@@ -2124,6 +2439,19 @@ class EInkControlGUI:
                 signal_name='PrepareForSleep',
                 dbus_interface='org.freedesktop.login1.Manager',
                 bus_name='org.freedesktop.login1')
+            # Lid open/close (UPower) drives tablet reader mode
+            bus.add_signal_receiver(
+                self._on_upower_properties_changed,
+                signal_name='PropertiesChanged',
+                dbus_interface='org.freedesktop.DBus.Properties',
+                bus_name='org.freedesktop.UPower',
+                path='/org/freedesktop/UPower')
+            try:
+                up = bus.get_object('org.freedesktop.UPower', '/org/freedesktop/UPower')
+                self._lid_closed = bool(dbus.Interface(up, 'org.freedesktop.DBus.Properties').Get(
+                    'org.freedesktop.UPower', 'LidIsClosed'))
+            except Exception:
+                pass
 
             self._glib_loop = GLib.MainLoop()
             self.logger.info("Resume monitor started (D-Bus PrepareForSleep)")
@@ -2154,6 +2482,23 @@ class EInkControlGUI:
                     self._on_system_resume()
             except Exception:
                 pass
+            closed = self._read_lid_state_acpi()
+            if closed is not None:
+                self._on_lid_changed(closed)
+
+    @staticmethod
+    def _read_lid_state_acpi():
+        try:
+            for name in os.listdir('/proc/acpi/button/lid'):
+                with open(f'/proc/acpi/button/lid/{name}/state') as f:
+                    return 'closed' in f.read()
+        except Exception:
+            return None
+        return None
+
+    def _on_upower_properties_changed(self, _iface, changed, _invalidated):
+        if 'LidIsClosed' in changed:
+            self._on_lid_changed(bool(changed['LidIsClosed']))
 
     def _on_prepare_for_sleep(self, going_to_sleep):
         """D-Bus signal handler for PrepareForSleep (runs on the monitor thread)."""
@@ -2215,6 +2560,9 @@ class EInkControlGUI:
                 pass
 
         self._uninhibit_sleep()
+        if self._reader_on:
+            # Leaving with the eInk still rotated (helper gone): at least undo the system prefs
+            self._release_reader_inhibitors()
         self._stop_refresh_timer()
         self._ensure_floating_button(False)
         self._kill_image_viewer()
