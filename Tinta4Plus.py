@@ -1778,7 +1778,13 @@ class EInkControlGUI:
                 error = f"unexpected error: {e}"
             finally:
                 self._uninhibit_sleep()
+                if error and kind == 'reader_on' and not self._reader_on:
+                    self._release_reader_inhibitors()
                 self._display_lock.release()
+        if not error and kind == 'reader_on' and self._lid_closed:
+            # The lid was closed during the switch: make sure the compositor's
+            # reaction to it did not undo the layout we just applied.
+            threading.Timer(2.0, self._reassert_reader_layout).start()
         self._ui(self._switch_finished, kind, error)
 
     def _switch_finished(self, kind, error):
@@ -1802,7 +1808,7 @@ class EInkControlGUI:
 
     # --- enable ----------------------------------------------------------
 
-    def _enable_eink_sequence(self, p):
+    def _enable_eink_sequence(self, p, rotation='normal'):
         """Worker thread: OLED → eInk, with rollback on failure."""
         self.log_message("Enabling E-Ink display...")
         self._inhibit_sleep()
@@ -1843,8 +1849,9 @@ class EInkControlGUI:
 
         # Step 1: Enable E-Ink output first (overlapping the OLED)
         self._set_busy_hint("Enabling the eInk output…")
-        self.log_message(f"Enabling E-Ink display on {self.DISPLAY_EINK} with {p['scale']}x scale...")
-        if not self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale']):
+        self.log_message(f"Enabling E-Ink display on {self.DISPLAY_EINK} with {p['scale']}x scale"
+                         + (f", {rotation}" if rotation != 'normal' else "") + "...")
+        if not self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation):
             rollback(f"could not enable {self.DISPLAY_EINK}")
         self.log_message(f"✓ E-Ink display ({self.DISPLAY_EINK}) enabled with {p['scale']}x scale")
         time.sleep(1.0)  # let the compositor settle
@@ -1880,17 +1887,18 @@ class EInkControlGUI:
         # On X11, overlapping two outputs at (0,0) with --panning can leave
         # the panning viewport broken once the other output goes away.
         time.sleep(0.3)
-        self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'])
+        self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation)
 
         # Step 6: Touch input follows the eInk
-        if self.display_mgr.map_touch_to_display(self.DISPLAY_EINK):
+        if self.display_mgr.map_touch_to_display(self.DISPLAY_EINK, rotation=rotation):
             self.log_message(f"✓ Touchscreen mapped to {self.DISPLAY_EINK}")
         else:
             self.log_message("Could not map touchscreen (may auto-map)")
 
         self._ui(self._start_refresh_timer)
         self._ui(self._ensure_floating_button, p['floating_button'])
-        self._verify_final_outputs(active=self.DISPLAY_EINK, inactive=self.DISPLAY_OLED, scale=p['scale'])
+        self._verify_final_outputs(active=self.DISPLAY_EINK, inactive=self.DISPLAY_OLED, scale=p['scale'],
+                                   rotation=rotation)
         self.log_message("✓ E-Ink display enabled")
 
     # --- disable ---------------------------------------------------------
@@ -1990,7 +1998,7 @@ class EInkControlGUI:
             raise SwitchError("the eInk T-CON could not be powered off (OLED restored)")
         self.log_message("✓ OLED display restored")
 
-    def _verify_final_outputs(self, active, inactive, scale, settle=1.5):
+    def _verify_final_outputs(self, active, inactive, scale, settle=1.5, rotation='normal'):
         """Worker thread: confirm the end state and correct it once if needed.
 
         The compositor can quietly re-enable an output we just turned off
@@ -2012,13 +2020,13 @@ class EInkControlGUI:
         self.log_message(f"⚠ Output state drifted after the switch ({active}={'on' if active_on else 'off'}, "
                          f"{inactive}={'on' if inactive_on else 'off'}) — correcting", level='warning')
         if not active_on:
-            self.display_mgr.enable_display(active, scale=scale)
+            self.display_mgr.enable_display(active, scale=scale, rotation=rotation)
             time.sleep(0.5)
         if inactive_on:
             # disable_display() refuses if it would be the last output
             self.display_mgr.disable_display(inactive)
             time.sleep(0.3)
-            self.display_mgr.enable_display(active, scale=scale)  # re-assert panning/scale as sole output
+            self.display_mgr.enable_display(active, scale=scale, rotation=rotation)  # re-assert as sole output
         try:
             active_on = self.display_mgr.is_display_active(active)
             inactive_on = self.display_mgr.is_display_active(inactive)
@@ -2034,12 +2042,36 @@ class EInkControlGUI:
 
     def _enter_reader_sequence(self, p):
         """Worker thread: (OLED →) eInk, rotated, reading mode, lid-safe."""
+        # Arm the lid/idle protections before anything else, so closing the
+        # lid while the displays are still switching cannot suspend or lock.
+        self._set_busy_hint("Preparing reader mode — keep the lid open for a moment…")
+        self._notify("Reader mode: preparing…", "Keep the lid open until the eInk is ready (about 10 s).",
+                     timeout_ms=15000)
+        self._acquire_reader_inhibitors()
         if not self._eink_on:
-            self._enable_eink_sequence(p)
-        self._apply_reader_layout(p, on=True)
+            self._enable_eink_sequence(p, rotation=p['reader_rotation'])
+            self._apply_reader_layout(p, on=True, already_rotated=True)
+        else:
+            self._apply_reader_layout(p, on=True)
         if p.get('open_reader_app'):
             self._ui(self._launch_reader_app)
-        self.log_message("✓ Tablet reader mode on — close the lid and read")
+        self.log_message("✓ Tablet reader mode on — you can close the lid now")
+        self._notify("Reader mode ready", "You can close the lid now. Open it to return to the OLED.",
+                     timeout_ms=8000)
+
+    def _notify(self, title, body, timeout_ms=6000, urgent=False):
+        """Desktop notification (shows on whichever display is active, i.e. the
+        eInk during reader mode). Replaces the previous one. Any thread."""
+        try:
+            import dbus
+            bus = dbus.SessionBus()
+            notifier = dbus.Interface(bus.get_object('org.freedesktop.Notifications', '/org/freedesktop/Notifications'),
+                                      'org.freedesktop.Notifications')
+            hints = {'urgency': dbus.Byte(2 if urgent else 1)}
+            self._notify_id = int(notifier.Notify('Tinta4PlusU', getattr(self, '_notify_id', 0),
+                                                  'preferences-desktop-display', title, body, [], hints, timeout_ms))
+        except Exception as e:
+            self.logger.debug(f"notification failed: {e}")
 
     def _launch_reader_app(self):
         """Open the eInk Reader fullscreen (its own single-instance handling applies)."""
@@ -2056,27 +2088,28 @@ class EInkControlGUI:
 
     def _leave_reader_sequence(self, p):
         """Worker thread: back to landscape/dynamic, then to the OLED."""
+        self._notify("Leaving reader mode", "Switching back to the OLED…", timeout_ms=8000)
         self._disable_eink_sequence(p)   # undoes the reader layout first
         self.log_message("✓ Tablet reader mode off")
 
-    def _apply_reader_layout(self, p, on):
+    def _apply_reader_layout(self, p, on, already_rotated=False):
         """Worker thread: rotate the eInk, map touch, set the eInk mode, inhibitors."""
         rotation = p['reader_rotation'] if on else 'normal'
-        self._set_busy_hint("Rotating the eInk…" if on else "Back to landscape…")
-        if not self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation):
-            if on:
-                raise SwitchError(f"could not rotate {self.DISPLAY_EINK} to {rotation}")
-            self.log_message(f"⚠ Could not restore landscape on {self.DISPLAY_EINK}", level='warning')
-        time.sleep(0.5)
-        if self.display_mgr.map_touch_to_display(self.DISPLAY_EINK, rotation=rotation):
-            self.log_message(f"✓ Touch and pen mapped to {self.DISPLAY_EINK} ({rotation})")
+        if not already_rotated:
+            self._set_busy_hint("Rotating the eInk…" if on else "Back to landscape…")
+            if not self.display_mgr.enable_display(self.DISPLAY_EINK, scale=p['scale'], rotation=rotation):
+                if on:
+                    raise SwitchError(f"could not rotate {self.DISPLAY_EINK} to {rotation}")
+                self.log_message(f"⚠ Could not restore landscape on {self.DISPLAY_EINK}", level='warning')
+            time.sleep(0.5)
+            if self.display_mgr.map_touch_to_display(self.DISPLAY_EINK, rotation=rotation):
+                self.log_message(f"✓ Touch and pen mapped to {self.DISPLAY_EINK} ({rotation})")
 
         if on:
             if self.execute_helper_command('set-reading'):
                 self._eink_mode = 'reading'
             self._reader_on = True
-            self._acquire_reader_inhibitors()
-            # Lid may already be closed when entering from a hotkey
+            self._acquire_reader_inhibitors()  # no-op if already armed
             self._ui(self._apply_display_state)
         else:
             self._release_reader_inhibitors()

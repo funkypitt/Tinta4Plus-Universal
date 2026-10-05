@@ -127,6 +127,8 @@ For reading long documents (a PDF magazine, a book) with the laptop closed and h
 2. Close the lid — the eInk now faces you — and read. If the desktop tries to re-enable the OLED or undo the rotation on the lid event, the app puts the reader layout back within a few seconds.
 3. Open the lid (or click **Leave tablet reader mode** / Super+Shift+P). The eInk goes back to landscape and *Dynamic* mode, the privacy image is shown upright, the T-CON is powered off and the OLED returns. Lid-close behaviour and auto-rotation are restored to what they were.
 
+The lid/suspend protections are armed before the displays start switching, so closing the lid early is safe; desktop notifications say "preparing… keep the lid open" and then "ready, you can close the lid" (they appear on the eInk once it is the active display). If the lid was closed during the switch, the layout is re-checked once it finishes.
+
 With the eInk Reader installed, entering reader mode also launches `eink-reader --fullscreen`, which reopens your last book fullscreen — one click from the OLED desktop to reading (Settings → *Open the eInk Reader fullscreen when entering reader mode*).
 
 Settings → *Tablet reader mode* lets you choose the orientation (portrait left / portrait right / landscape) and whether opening the lid leaves reader mode. While reading, GNOME is told not to suspend, not to lock the screen on lid close (its default when it does not suspend — with the keyboard under the lid that lock could not be dismissed) and to show the on-screen keyboard if a lock happens anyway; everything is restored when you leave. Reader mode survives a GUI restart (the inhibitors are re-acquired) and a crash (the overridden GNOME settings are restored on the next start).
