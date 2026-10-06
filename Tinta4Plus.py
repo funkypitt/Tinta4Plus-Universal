@@ -2105,19 +2105,32 @@ class EInkControlGUI:
         except Exception as e:
             self.logger.debug(f"notification failed: {e}")
 
+    READER_BUS = ('org.eink.Reader', '/org/eink/Reader', 'org.eink.Reader')
+
+    def _reader_call(self, method):
+        """Best-effort call on the running eInk Reader's D-Bus interface; False if none."""
+        try:
+            import dbus
+            bus = dbus.SessionBus()
+            name, path, iface = self.READER_BUS
+            if not bus.name_has_owner(name):
+                return False
+            getattr(dbus.Interface(bus.get_object(name, path), iface), method)(timeout=5)
+            return True
+        except Exception as e:
+            self.logger.info(f"Reader {method}: {e}")
+            return False
+
     def _launch_reader_app(self):
-        """Open the eInk Reader fullscreen — once; Lector has no single-instance guard."""
+        """Open the eInk Reader fullscreen (a running reader is asked over D-Bus;
+        `eink-reader --fullscreen` itself forwards to a running instance too)."""
+        if self._reader_call('Fullscreen'):
+            self.log_message("✓ eInk Reader brought to fullscreen")
+            return
         exe = shutil.which(self.READER_APP)
         if not exe:
             self.log_message("eInk Reader not installed — not launching it", level='warning')
             return
-        try:
-            running = subprocess.run(['pgrep', '-f', r'python3 -m lector'], capture_output=True, text=True)
-            if running.returncode == 0 and running.stdout.strip():
-                self.log_message("eInk Reader already running — not starting another copy")
-                return
-        except Exception:
-            pass
         try:
             subprocess.Popen([exe, '--fullscreen'], start_new_session=True,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2129,6 +2142,8 @@ class EInkControlGUI:
         """Worker thread: back to landscape/dynamic, then to the OLED."""
         self._notify("Leaving reader mode", "Switching back to the OLED…", timeout_ms=8000)
         self._disable_eink_sequence(p)   # undoes the reader layout first
+        if self._reader_call('ExitFullscreen'):
+            self.log_message("✓ eInk Reader left fullscreen")
         self.log_message("✓ Tablet reader mode off")
 
     def _apply_reader_layout(self, p, on, already_rotated=False):
