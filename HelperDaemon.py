@@ -159,8 +159,11 @@ class HelperDaemon:
             on_reader=self._hotkey_reader,
         )
 
-        # Watchdog
-        self.watchdog = WatchdogTimer(WATCHDOG_TIMEOUT, self.shutdown, self.logger)
+        # Watchdog — never fires while a command is being handled
+        self._busy_lock = threading.Lock()
+        self._busy_commands = 0
+        self.watchdog = WatchdogTimer(WATCHDOG_TIMEOUT, self.shutdown, self.logger,
+                                      is_busy=lambda: self._busy_commands > 0)
 
         # Shutdown may be requested by the watchdog, a client, a signal and
         # run()'s finally block at the same time; only the first one acts.
@@ -492,7 +495,17 @@ class HelperDaemon:
         return level
 
     def handle_command(self, command_data):
-        """Process a command and return response"""
+        """Process a command and return response (watchdog held off meanwhile)"""
+        with self._busy_lock:
+            self._busy_commands += 1
+        try:
+            return self._handle_command(command_data)
+        finally:
+            with self._busy_lock:
+                self._busy_commands -= 1
+            self.watchdog.reset()  # the end of a long command counts as life too
+
+    def _handle_command(self, command_data):
         try:
             if not isinstance(command_data, dict):
                 raise ValueError("Command must be a JSON object")

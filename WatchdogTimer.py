@@ -22,10 +22,16 @@ class WatchdogTimer:
 
     SUSPEND_GRACE = 30.0  # extra seconds to wait after detected suspend
 
-    def __init__(self, timeout, callback, logger):
+    def __init__(self, timeout, callback, logger, is_busy=None):
         self.timeout = timeout
         self.callback = callback
         self.logger = logger
+        # Optional predicate: while it returns True (a command is being
+        # handled — e.g. a slow USB reconnect after resume) expiry only
+        # re-arms the timer instead of shutting the daemon down. The client's
+        # keepalives queue behind long commands on its single connection, so
+        # silence during a command is not a dead client.
+        self.is_busy = is_busy
         self.timer = None
         self.lock = threading.Lock()
         self._last_reset = time.monotonic()
@@ -43,6 +49,10 @@ class WatchdogTimer:
 
     def _expired(self):
         """Called when timer expires"""
+        if self.is_busy and self.is_busy():
+            self.logger.info("Watchdog: a command is in progress, re-arming")
+            self.reset()
+            return
         elapsed = time.monotonic() - self._last_reset
         # If elapsed time is much larger than the timeout, the system
         # was likely suspended.  Give the GUI a grace period to reconnect.
@@ -61,6 +71,10 @@ class WatchdogTimer:
 
     def _grace_expired(self):
         """Called when the post-suspend grace period expires without a reset."""
+        if self.is_busy and self.is_busy():
+            self.logger.info("Watchdog: a command is in progress after resume, re-arming")
+            self.reset()
+            return
         self.logger.warning(f"Watchdog grace period expired, shutting down")
         self.callback()
     

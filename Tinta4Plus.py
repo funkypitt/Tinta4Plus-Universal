@@ -2070,14 +2070,20 @@ class EInkControlGUI:
         # Arm the lid/idle protections before anything else, so closing the
         # lid while the displays are still switching cannot suspend or lock.
         self._set_busy_hint("Preparing reader mode — keep the lid open for a moment…")
-        self._notify("Reader mode: preparing…", "Keep the lid open until the eInk is ready (about 10 s).",
-                     timeout_ms=15000)
+        self._notify("Reader mode: preparing…", "Keep the lid open until the eInk is ready (about 15 s).",
+                     timeout_ms=20000)
         self._acquire_reader_inhibitors()
+        # Give the notification a quiet moment on screen before anything moves
+        time.sleep(2.0)
         if not self._eink_on:
-            self._enable_eink_sequence(p, rotation=p['reader_rotation'])
-            self._apply_reader_layout(p, on=True, already_rotated=True)
-        else:
-            self._apply_reader_layout(p, on=True)
+            # Enable the eInk *flat* first: a rotated eInk next to the OLED would
+            # grow the X screen (1600x2560 beside 2880x1800), and GNOME answers a
+            # screen-size change by cloning both panels — the retry storm then
+            # blinks the OLED and the switch rolls back. Flat at (0,0) with
+            # panning fits inside the existing screen and GNOME stays quiet;
+            # the rotation is applied once the eInk is the sole output.
+            self._enable_eink_sequence(p)
+        self._apply_reader_layout(p, on=True)
         if p.get('open_reader_app'):
             self._ui(self._launch_reader_app)
         self.log_message("✓ Tablet reader mode on — you can close the lid now")
