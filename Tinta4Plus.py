@@ -2070,7 +2070,8 @@ class EInkControlGUI:
         # Arm the lid/idle protections before anything else, so closing the
         # lid while the displays are still switching cannot suspend or lock.
         self._set_busy_hint("Preparing reader mode — keep the lid open for a moment…")
-        self._notify("Reader mode: preparing…", "Keep the lid open until the eInk is ready (about 15 s).",
+        self._notify("Reader mode: switching to the eInk…",
+                     "You can close the lid as soon as this screen goes dark. The eInk takes about 15 s.",
                      timeout_ms=20000)
         self._acquire_reader_inhibitors()
         # Give the notification a quiet moment on screen before anything moves
@@ -2087,7 +2088,7 @@ class EInkControlGUI:
         if p.get('open_reader_app'):
             self._ui(self._launch_reader_app)
         self.log_message("✓ Tablet reader mode on — you can close the lid now")
-        self._notify("Reader mode ready", "You can close the lid now. Open it to return to the OLED.",
+        self._notify("Reader mode ready", "Reading mode, portrait. Open the lid to return to the OLED.",
                      timeout_ms=8000)
 
     def _notify(self, title, body, timeout_ms=6000, urgent=False):
