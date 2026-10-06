@@ -1385,7 +1385,9 @@ class EInkControlGUI:
             # If helper is a compiled binary, run it directly via pkexec
             # If it's a .py script, invoke via python3
             if helper_path.endswith('.py'):
-                cmd = ['pkexec', 'python3', helper_path]
+                # The system interpreter explicitly: pkexec resets PATH, and a
+                # user-level python3 (pyenv, conda) would lack the system packages.
+                cmd = ['pkexec', '/usr/bin/python3', helper_path]
             else:
                 cmd = ['pkexec', helper_path]
 

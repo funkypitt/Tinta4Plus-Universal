@@ -236,8 +236,10 @@ install_deps() {
     # Script mode: install pip packages not available in apt
     if [ "$INSTALL_MODE" = "script" ]; then
         step "Installing Python pip packages (portio, pyusb, sv-ttk)"
-        local pip_cmd="pip3"
-        if ! command -v pip3 &>/dev/null; then
+        # Always the system interpreter: the app runs on /usr/bin/python3 and
+        # needs the packages there, whatever python3 is first in PATH.
+        local pip_cmd="/usr/bin/python3 -m pip"
+        if ! /usr/bin/python3 -m pip --version &>/dev/null; then
             apt-get install -y -qq python3-pip >> "$LOG_FILE" 2>&1
         fi
         # Install as system-wide (running as root)
@@ -265,17 +267,17 @@ check_deps() {
     fi
 
     # Both modes need tkinter at runtime
-    if ! python3 -c "import tkinter" 2>/dev/null; then
+    if ! /usr/bin/python3 -c "import tkinter" 2>/dev/null; then
         missing+=("python3-tk (apt)")
     fi
 
     # Script mode needs Python modules
     if [ "$INSTALL_MODE" = "script" ]; then
-        if ! command -v python3 &>/dev/null; then
+        if [ ! -x /usr/bin/python3 ]; then
             missing+=("python3 (apt)")
         else
             for mod in usb portio; do
-                if ! python3 -c "import $mod" 2>/dev/null; then
+                if ! /usr/bin/python3 -c "import $mod" 2>/dev/null; then
                     case "$mod" in
                         usb)    missing+=("pyusb (pip3 install pyusb)") ;;
                         portio) missing+=("portio (pip3 install portio)") ;;
@@ -333,7 +335,7 @@ install_binary() {
         done
         cat > "${BIN_DIR}/toggle-eink" << 'WRAPPER'
 #!/bin/bash
-exec python3 /opt/tinta4plusu/toggle-eink.py "$@"
+exec /usr/bin/python3 /opt/tinta4plusu/toggle-eink.py "$@"
 WRAPPER
         chmod 755 "${BIN_DIR}/toggle-eink"
         info "toggle-eink CLI tool installed."
@@ -414,19 +416,19 @@ install_script() {
     # Create launcher wrappers in /usr/local/bin
     cat > "${BIN_DIR}/tinta4plusu" << 'WRAPPER'
 #!/bin/bash
-exec python3 /opt/tinta4plusu/Tinta4Plus.py "$@"
+exec /usr/bin/python3 /opt/tinta4plusu/Tinta4Plus.py "$@"
 WRAPPER
     chmod 755 "${BIN_DIR}/tinta4plusu"
 
     cat > "${BIN_DIR}/tinta4plusu-helper" << 'WRAPPER'
 #!/bin/bash
-exec python3 /opt/tinta4plusu/HelperDaemon.py "$@"
+exec /usr/bin/python3 /opt/tinta4plusu/HelperDaemon.py "$@"
 WRAPPER
     chmod 755 "${BIN_DIR}/tinta4plusu-helper"
 
     cat > "${BIN_DIR}/toggle-eink" << 'WRAPPER'
 #!/bin/bash
-exec python3 /opt/tinta4plusu/toggle-eink.py "$@"
+exec /usr/bin/python3 /opt/tinta4plusu/toggle-eink.py "$@"
 WRAPPER
     chmod 755 "${BIN_DIR}/toggle-eink"
 
@@ -443,7 +445,7 @@ install_indicator_files() {
     cp "${SCRIPT_DIR}"/icons/tinta4plusu-*-symbolic.svg "${INSTALL_DIR}/icons/"
     cat > "${BIN_DIR}/tinta4plusu-indicator" << 'WRAPPER'
 #!/bin/bash
-exec python3 /opt/tinta4plusu/Indicator.py "$@"
+exec /usr/bin/python3 /opt/tinta4plusu/Indicator.py "$@"
 WRAPPER
     chmod 755 "${BIN_DIR}/tinta4plusu-indicator"
     info "Top-bar indicator installed (tinta4plusu-indicator)."

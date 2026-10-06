@@ -195,7 +195,7 @@ The Lector fork lives in its own repository (https://github.com/funkypitt/eink-r
 - `dist/` — PyInstaller output (the binaries)
 
 ## Conventions
-- The project does not use a virtualenv — system Python 3.12.3 with system packages
+- The project does not use a virtualenv — system Python 3.12.3 with system packages. Wrappers, installer checks, pip installs and the pkexec launch all name `/usr/bin/python3` explicitly: a pyenv/conda/uv `python3` first in PATH would otherwise run the app on an interpreter without `python3-tk`/`dbus`/`gi` (tester report, Oct 2026).
 - Dependencies: `python3-tk`, `pyusb`, `portio`, `sv-ttk`, `libusb-1.0-0`, `policykit-1-gnome` (GNOME/Cinnamon)
 - GUI uses sv-ttk dark theme
 - GUI log: `~/.cache/Tinta4PlusU/gui.log` (rotating, 1 MB × 3) + console. Helper log: `/var/log/tinta4plusu-helper.log` (0644). Nothing is written to predictable `/tmp` paths except the socket.
