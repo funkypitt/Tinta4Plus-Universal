@@ -126,9 +126,20 @@ class DisplayManager:
         """
         return self._use_mutter_wayland()
 
+    def _mutter_can_switch(self):
+        """GNOME (Wayland or X11): a sole-output layout can be applied atomically
+        through Mutter, which also rotates the eInk reliably — xrandr cannot
+        rotate it once it is the only output on this driver (the output drops
+        out). Lid-closed activations are refused by Mutter, so callers fall back
+        to xrandr (see set_sole_output)."""
+        if self._use_mutter_wayland():
+            return True
+        return (self.session_type == 'x11' and self.desktop_env == 'gnome'
+                and self._mutter_available())
+
     def supports_atomic_switch(self):
         """True when set_sole_output() is a single compositor call (GNOME)."""
-        return self._use_mutter_apply()
+        return self._mutter_can_switch()
 
     def get_displays(self):
         """Get list of connected displays."""
@@ -174,8 +185,12 @@ class DisplayManager:
         if rotation not in self.ROTATIONS:
             rotation = 'normal'
         others = [c for c in (self.OLED_CONNECTOR, self.EINK_CONNECTOR) if c != display_name]
-        if self._use_mutter_apply():
-            return self._set_sole_output_mutter(display_name, scale, rotation)
+        if self._mutter_can_switch():
+            if self._set_sole_output_mutter(display_name, scale, rotation):
+                return True
+            if self._use_mutter_wayland():
+                return False  # nothing else can drive the displays on Wayland
+            self.logger.warning("Mutter refused the layout (lid closed?) — falling back to xrandr")
         if not self.enable_display(display_name, scale=scale, rotation=rotation):
             return False
         time.sleep(0.3)

@@ -2070,9 +2070,9 @@ class EInkControlGUI:
         # Arm the lid/idle protections before anything else, so closing the
         # lid while the displays are still switching cannot suspend or lock.
         self._set_busy_hint("Preparing reader mode — keep the lid open for a moment…")
-        self._notify("Reader mode: switching to the eInk…",
-                     "You can close the lid as soon as this screen goes dark. The eInk takes about 15 s.",
-                     timeout_ms=20000)
+        self._notify("Reader mode: the OLED is about to turn off",
+                     "When this screen goes dark, close the lid. The eInk needs about 15 s to be ready.",
+                     timeout_ms=20000, urgent=True)
         self._acquire_reader_inhibitors()
         # Give the notification a quiet moment on screen before anything moves
         time.sleep(2.0)
@@ -2106,11 +2106,18 @@ class EInkControlGUI:
             self.logger.debug(f"notification failed: {e}")
 
     def _launch_reader_app(self):
-        """Open the eInk Reader fullscreen (its own single-instance handling applies)."""
+        """Open the eInk Reader fullscreen — once; Lector has no single-instance guard."""
         exe = shutil.which(self.READER_APP)
         if not exe:
             self.log_message("eInk Reader not installed — not launching it", level='warning')
             return
+        try:
+            running = subprocess.run(['pgrep', '-f', r'python3 -m lector'], capture_output=True, text=True)
+            if running.returncode == 0 and running.stdout.strip():
+                self.log_message("eInk Reader already running — not starting another copy")
+                return
+        except Exception:
+            pass
         try:
             subprocess.Popen([exe, '--fullscreen'], start_new_session=True,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
