@@ -66,6 +66,9 @@ do_uninstall() {
     rm -f  "${POLKIT_DIR}/org.tinta4plusu.helper.policy"
 
     info "Tinta4PlusU has been uninstalled."
+    if [ -x "${BIN_DIR}/eink-reader" ] || [ -d "/opt/eink-reader" ]; then
+        info "The eInk Reader is installed separately: sudo bash reader/installer.sh --uninstall"
+    fi
     exit 0
 }
 
