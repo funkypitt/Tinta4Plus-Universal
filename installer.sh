@@ -147,6 +147,40 @@ check_root() {
     fi
 }
 
+# ─── Session type: X11 is required for the eInk workflow ────────────────────
+
+check_session_type() {
+    # Read the invoking user's session type (sudo strips XDG_SESSION_TYPE)
+    local stype="${XDG_SESSION_TYPE:-}"
+    if [ -z "$stype" ] && [ -n "${SUDO_USER:-}" ]; then
+        local uid sess_id
+        uid=$(id -u "$SUDO_USER" 2>/dev/null) || true
+        sess_id=$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u="$uid" '$2 == u {print $1; exit}') || true
+        [ -n "$sess_id" ] && stype=$(loginctl show-session "$sess_id" -p Type --value 2>/dev/null) || true
+    fi
+    case "$stype" in
+        x11)
+            info "Session type: X11 (recommended)."
+            ;;
+        wayland)
+            echo ""
+            echo -e "${RED}╔══════════════════════════════════════════════════════════════════╗${NC}"
+            echo -e "${RED}║  You are running a Wayland session. Tinta4PlusU needs X11.      ║${NC}"
+            echo -e "${RED}║  Under Wayland the compositor (Mutter) treats the eInk as a      ║${NC}"
+            echo -e "${RED}║  closed laptop panel: it turns it off when the lid closes and   ║${NC}"
+            echo -e "${RED}║  refuses to bring it back, so tablet reader mode cannot work.   ║${NC}"
+            echo -e "${RED}║  At the login screen choose the gear icon → \"Ubuntu on Xorg\".   ║${NC}"
+            echo -e "${RED}╚══════════════════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            read -rp "Continue installing anyway? [y/N] " answer
+            [[ "$answer" =~ ^[Yy]$ ]] || { info "Installation cancelled."; exit 1; }
+            ;;
+        *)
+            warn "Could not determine the session type. X11 (\"Ubuntu on Xorg\" at login) is HIGHLY recommended; Wayland is not supported for reader mode."
+            ;;
+    esac
+}
+
 # ─── Detect desktop environment ─────────────────────────────────────────────
 
 detect_de() {
@@ -557,6 +591,7 @@ main() {
     fi
 
     check_root
+    check_session_type
     choose_mode
     detect_de
     install_deps

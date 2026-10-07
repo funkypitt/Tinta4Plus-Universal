@@ -10,6 +10,8 @@ This is a universal fork of [Tinta4Plus](https://github.com/joncox123/Tinta4Plus
 
 ## Supported configurations
 
+> **Use an X11 session — this is a hard requirement for tablet reader mode, not a preference.** At the Ubuntu login screen click the gear icon and choose **"Ubuntu on Xorg"**. Under Wayland the compositor treats the eInk as a closed laptop panel: it switches it off when the lid closes and refuses to switch it back on, so reading with the lid closed cannot work. The installer warns when it detects a Wayland session; the app disables reader mode there.
+
 | Desktop | Session | Status |
 |---------|---------|--------|
 | GNOME | X11 | Tested |

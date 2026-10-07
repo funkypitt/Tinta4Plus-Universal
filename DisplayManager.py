@@ -127,15 +127,16 @@ class DisplayManager:
         return self._use_mutter_wayland()
 
     def _mutter_can_switch(self):
-        """GNOME (Wayland or X11): a sole-output layout can be applied atomically
-        through Mutter, which also rotates the eInk reliably — xrandr cannot
-        rotate it once it is the only output on this driver (the output drops
-        out). Lid-closed activations are refused by Mutter, so callers fall back
-        to xrandr (see set_sole_output)."""
-        if self._use_mutter_wayland():
-            return True
-        return (self.session_type == 'x11' and self.desktop_env == 'gnome'
-                and self._mutter_available())
+        """Atomic sole-output switching through Mutter — Wayland only.
+
+        On X11 it was tried twice (5–7 Oct 2026) and must stay off: Mutter
+        reverts *its own* eInk-only configuration as soon as the lid closes
+        ("closed laptop panel") and then refuses to re-apply it, whereas a
+        layout applied behind its back with xrandr is left alone on lid close.
+        Lid-closed reading is the whole point, so X11 = xrandr, rotation
+        included (see _apply_xrandr_enable for the framebuffer handling).
+        """
+        return self._use_mutter_wayland()
 
     def supports_atomic_switch(self):
         """True when set_sole_output() is a single compositor call (GNOME)."""
@@ -447,7 +448,9 @@ class DisplayManager:
             self.logger.warning(f"Unknown display {display_name}, using auto mode")
             native_width, native_height = None, None
 
-        cmd = ['xrandr', '--output', display_name, '--rotate', rotation]
+        # --primary: GTK4 (Nautilus, mutter-x11-frames) dereferences the X
+        # primary monitor and crashes when the primary output was turned off.
+        cmd = ['xrandr', '--output', display_name, '--primary', '--rotate', rotation]
 
         if native_width and native_height:
             cmd.extend(['--mode', f'{native_width}x{native_height}'])
@@ -469,6 +472,19 @@ class DisplayManager:
                                  f"physical {native_width}x{native_height}, rotation {rotation}")
         else:
             cmd.extend(['--auto', '--pos', '0x0'])
+
+        if native_width and native_height and rotation != 'normal':
+            # A rotated CRTC needs a framebuffer tall enough *before* the mode
+            # set, otherwise RandR answers BadMatch and the output drops out.
+            # Grow it to cover both the current screen and the rotated output;
+            # _fit_framebuffer_x11() shrinks it again once this output is alone.
+            try:
+                cur = self._get_screen_size_x11() or (0, 0)
+                need_w = max(cur[0], int(native_height * scale_inv))
+                need_h = max(cur[1], int(native_width * scale_inv))
+                subprocess.run(['xrandr', '--fb', f'{need_w}x{need_h}'], capture_output=True, timeout=5)
+            except Exception as e:
+                self.logger.warning(f"Framebuffer pre-grow failed: {e}")
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if result.returncode != 0:

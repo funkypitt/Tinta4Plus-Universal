@@ -1348,9 +1348,11 @@ class EInkControlGUI:
         else:
             self.switch_hint.config(text="You will have a few seconds to flip the lid to the eInk side.")
 
+        wayland = self.display_mgr.session_type == 'wayland'
         self.reader_btn.config(
-            text="📖  Leave tablet reader mode" if self._reader_on else "📖  Tablet reader mode",
-            state='normal' if (connected and not busy) else 'disabled')
+            text="📖  Leave tablet reader mode" if self._reader_on else
+                 ("📖  Tablet reader mode (needs an X11 session)" if wayland else "📖  Tablet reader mode"),
+            state='normal' if (connected and not busy and not wayland) else 'disabled')
 
         # eInk card
         eink_ctl = 'normal' if (on and connected and not busy) else 'disabled'
@@ -2344,6 +2346,11 @@ class EInkControlGUI:
 
     def on_reader_toggled(self):
         """Reader button / Super+Shift+P."""
+        if self.display_mgr.session_type == 'wayland' and not self._reader_on:
+            self.log_message("Tablet reader mode needs an X11 session: under Wayland the compositor switches the "
+                             "eInk off when the lid closes. Log in with \"Ubuntu on Xorg\".", level='error')
+            self.update_status("Reader mode unavailable under Wayland — log in with \"Ubuntu on Xorg\"", error=True)
+            return
         if self._switching:
             self.log_message("Switch already in progress...", level='warning')
             return
