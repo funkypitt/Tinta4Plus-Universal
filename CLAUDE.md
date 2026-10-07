@@ -170,8 +170,8 @@ The Lector fork lives in its own repository (https://github.com/funkypitt/eink-r
 
 ### GUI design notes
 
-- sv_ttk dark theme. Text size (Settings → Normal/Large/Larger, default Large = 1.2×) is applied by rescaling sv_ttk's named fonts (`SunValley*Font`, pixel sizes) in `_apply_text_size()`; our own fonts derive from `SunValleyBodyFont` — never from `TkDefaultFont`, which Tk scales independently and renders much larger. Use `Card.TFrame`, `Accent.TButton`, `Toggle.TButton`, `Switch.TCheckbutton`.
-- Layout: header with status chips → "Active display" card (one big accent button, countdown shown in the button, Esc cancels) → "eInk" card (mode toggles, refresh, frontlight −/slider/+, auto-refresh) → Notebook (Settings | Activity) → footer status line.
+- sv_ttk dark theme. Text size (Settings → Normal/Large/Larger, default Larger = 1.4×) is applied by rescaling sv_ttk's named fonts (`SunValley*Font`, pixel sizes) in `_apply_text_size()`; our own fonts derive from `SunValleyBodyFont` — never from `TkDefaultFont`, which Tk scales independently and renders much larger. Use `Card.TFrame`, `Accent.TButton`, `Toggle.TButton`, `Switch.TCheckbutton`.
+- Layout: header with status chips → "Active display" card (big accent switch button with the countdown shown in it, Esc cancels; same-sized "Tablet reader mode" button) → "eInk" card (mode toggles, refresh, frontlight −/slider/+, auto-refresh) → Notebook (Settings | Shortcuts | Activity) → footer status line. Default text size "Larger" (1.4×), base window 720×980 scaled by the text factor.
 - `python3 Tinta4Plus.py --ui-preview[=connected|eink][:settings|activity]` renders the UI with hardware, helper and monitors disabled.
 
 ## File inventory

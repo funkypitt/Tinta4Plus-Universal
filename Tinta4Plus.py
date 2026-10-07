@@ -377,7 +377,7 @@ class EInkControlGUI:
         'SunValleyBodyLargeFont': 18, 'SunValleySubtitleFont': 20, 'SunValleyTitleFont': 28,
         'SunValleyTitleLargeFont': 40, 'SunValleyDisplayFont': 68,
     }
-    BASE_WINDOW = (660, 900)
+    BASE_WINDOW = (720, 980)
 
     # Tablet reader mode: orientation presets (label -> xrandr rotation)
     READER_ORIENTATIONS = {'Portrait (left)': 'left', 'Portrait (right)': 'right', 'Landscape': 'normal'}
@@ -400,7 +400,7 @@ class EInkControlGUI:
         'flip_countdown': 5,
         'privacy_image': 'random',
         'floating_button': True,
-        'text_size': 'Large',
+        'text_size': 'Larger',
         'reader_rotation': 'left',       # eInk rotation in tablet reader mode
         'reader_lid_open_exits': True,   # opening the lid leaves reader mode (-> OLED)
         'reader_active': False,          # persisted so a restart knows we are reading
@@ -429,7 +429,7 @@ class EInkControlGUI:
         # Window size follows the text size; capped to the screen so the
         # title bar stays reachable on GNOME (top bar + decorations).
         settings_early = self.load_settings()
-        self.text_size = settings_early['text_size'] if settings_early['text_size'] in self.TEXT_SIZES else 'Large'
+        self.text_size = settings_early['text_size'] if settings_early['text_size'] in self.TEXT_SIZES else 'Larger'
         factor = self.TEXT_SIZES[self.text_size]
         screen_w, screen_h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         win_w = min(int(self.BASE_WINDOW[0] * factor), screen_w - 100)
@@ -539,8 +539,8 @@ class EInkControlGUI:
             self.update_status("UI preview mode — hardware disabled")
             self.log_message("UI preview mode: helper, display checks and resume monitor are off", level='warning')
             state, _, tab = self.ui_preview.partition(':')
-            if tab in ('settings', 'activity'):
-                self.notebook.select(0 if tab == 'settings' else 1)
+            if tab in ('settings', 'shortcuts', 'activity'):
+                self.notebook.select({'settings': 0, 'shortcuts': 1, 'activity': 2}[tab])
             self.ui_preview = state
             if self.ui_preview in ('connected', 'eink'):
                 self._ec_available = True
@@ -801,7 +801,8 @@ class EInkControlGUI:
                                      wraplength=580, justify='left')
         self.switch_hint.grid(row=2, column=0, sticky='ew', pady=(8, 0))
 
-        self.reader_btn = ttk.Button(display_card, text="📖  Tablet reader mode", command=self.on_reader_toggled)
+        self.reader_btn = ttk.Button(display_card, text="📖  Tablet reader mode", style='Big.TButton',
+                                     command=self.on_reader_toggled)
         self.reader_btn.grid(row=4, column=0, sticky='ew', pady=(10, 0))
         Tooltip(self.reader_btn, "Switch to eInk in portrait with reading mode, and keep the laptop awake\n"
                                  "with the lid closed so you can read it like a tablet.\n"
@@ -884,6 +885,7 @@ class EInkControlGUI:
         outer.rowconfigure(3, weight=1)
 
         self._build_settings_tab()
+        self._build_shortcuts_tab()
         self._build_activity_tab()
 
         # ---- Footer ---------------------------------------------------
@@ -1093,32 +1095,13 @@ class EInkControlGUI:
         ttk.Label(tab, text="Text size").grid(row=row, column=0, sticky='w', padx=(0, 12), pady=(0, 0))
         size_row = ttk.Frame(tab)
         size_row.grid(row=row, column=1, sticky='w', pady=(12, 0))
-        self.text_size_var = tk.StringVar(value='Large')
+        self.text_size_var = tk.StringVar(value='Larger')
         self.text_size_combo = ttk.Combobox(size_row, textvariable=self.text_size_var, width=10,
                                             values=list(self.TEXT_SIZES), state='readonly')
         self.text_size_combo.pack(side='left')
         self.text_size_combo.bind('<<ComboboxSelected>>', self.on_text_size_changed)
         ttk.Label(size_row, text="applies immediately", style='Small.TLabel').pack(side='left', padx=(8, 0))
         row += 1
-
-        # Shortcuts reference
-        ttk.Separator(tab).grid(row=row, column=0, columnspan=2, sticky='ew', pady=12)
-        row += 1
-        ttk.Label(tab, text="Keyboard shortcuts", style='H2.TLabel').grid(row=row, column=0, columnspan=2, sticky='w')
-        row += 1
-        shortcuts = [
-            ("Super+P  (Fn+F7)", "Switch between OLED and eInk — works system-wide while the helper runs"),
-            ("Super+Shift+P", "Tablet reader mode on / off"),
-            ("Help  (Fn+F9)", "Full eInk refresh"),
-            ("Fn+F5 / Fn+F6", "Frontlight down / up (eInk only; OLED brightness otherwise)"),
-            ("Esc", "Cancel a running countdown (this window)"),
-            ("Ctrl+Q", "Quit (closing the window only hides it while the indicator runs)"),
-        ]
-        for keys, what in shortcuts:
-            ttk.Label(tab, text=keys, font=self.font_mono).grid(row=row, column=0, sticky='w', padx=(0, 12), pady=(3, 0))
-            ttk.Label(tab, text=what, style='Muted.TLabel', wraplength=400, justify='left').grid(
-                row=row, column=1, sticky='w', pady=(3, 0))
-            row += 1
 
         # Mouse wheel anywhere over the tab scrolls it (child widgets would
         # otherwise swallow the event); value widgets keep their own wheel.
@@ -1130,6 +1113,45 @@ class EInkControlGUI:
                 for seq in ('<Button-4>', '<Button-5>', '<MouseWheel>'):
                     w.bind(seq, _wheel, add='+')
             stack.extend(w.winfo_children())
+
+    def _build_shortcuts_tab(self):
+        tab = ttk.Frame(self.notebook, padding=14)
+        self.notebook.add(tab, text="  Shortcuts  ")
+        tab.columnconfigure(1, weight=1)
+        row = 0
+        ttk.Label(tab, text="Keyboard shortcuts", style='H2.TLabel').grid(row=row, column=0, columnspan=2, sticky='w')
+        row += 1
+        ttk.Label(tab, text="System-wide shortcuts work while the helper daemon runs, even with this window closed.",
+                  style='Small.TLabel', wraplength=600, justify='left').grid(row=row, column=0, columnspan=2, sticky='w', pady=(2, 10))
+        row += 1
+        shortcuts = [
+            ("Super+P  (Fn+F7)", "Switch between OLED and eInk — works system-wide while the helper runs"),
+            ("Super+Shift+P", "Tablet reader mode on / off"),
+            ("Help  (Fn+F9)", "Full eInk refresh"),
+            ("Fn+F5 / Fn+F6", "Frontlight down / up (eInk only; OLED brightness otherwise)"),
+            ("Esc", "Cancel a running countdown (this window)"),
+            ("Ctrl+Q", "Quit (closing the window only hides it while the indicator runs)"),
+        ]
+        for keys, what in shortcuts:
+            ttk.Label(tab, text=keys, font=self.font_mono).grid(row=row, column=0, sticky='w', padx=(0, 16), pady=(6, 0))
+            ttk.Label(tab, text=what, style='Muted.TLabel', wraplength=460, justify='left').grid(
+                row=row, column=1, sticky='w', pady=(6, 0))
+            row += 1
+        ttk.Separator(tab).grid(row=row, column=0, columnspan=2, sticky='ew', pady=12)
+        row += 1
+        ttk.Label(tab, text="In the eInk Reader (touch)", style='H2.TLabel').grid(row=row, column=0, columnspan=2, sticky='w')
+        row += 1
+        gestures = [
+            ("Tap right / left edge", "Next / previous page"),
+            ("Swipe left / right", "Next / previous page"),
+            ("Tap the centre", "Show the navigation bar"),
+            ("Double-tap the centre", "Fullscreen on / off"),
+            ("Press and hold", "Context menu"),
+        ]
+        for keys, what in gestures:
+            ttk.Label(tab, text=keys).grid(row=row, column=0, sticky='w', padx=(0, 16), pady=(6, 0))
+            ttk.Label(tab, text=what, style='Muted.TLabel').grid(row=row, column=1, sticky='w', pady=(6, 0))
+            row += 1
 
     def _build_activity_tab(self):
         tab = ttk.Frame(self.notebook, padding=(8, 8, 8, 8))
