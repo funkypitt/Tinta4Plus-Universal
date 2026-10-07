@@ -456,37 +456,44 @@ class DisplayManager:
             cmd.extend(['--mode', f'{native_width}x{native_height}'])
             cmd.extend(['--pos', '0x0'])
             scale_inv = 1.0 / scale if (scale is not None and scale != 1.0) else 1.0
-            cmd.extend(['--scale', f'{scale_inv}x{scale_inv}' if scale_inv != 1.0 else '1x1'])
+            if scale_inv != 1.0:
+                cmd.extend(['--scale', f'{scale_inv}x{scale_inv}'])
+                self.logger.info(f"Scaling: xrandr scale {scale_inv:.3f} (our scale={scale}), "
+                                 f"physical {native_width}x{native_height}, rotation {rotation}")
+            out_w, out_h = int(native_width * scale_inv), int(native_height * scale_inv)
+            if self.is_portrait(rotation):
+                out_w, out_h = out_h, out_w
 
             if rotation == 'normal':
                 # Panning pins the framebuffer to the (scaled) output size so a
                 # leftover larger screen never turns into a scrolling desktop.
-                panning_width = int(native_width * scale_inv)
-                panning_height = int(native_height * scale_inv)
-                cmd.extend(['--panning', f'{panning_width}x{panning_height}'])
-            # Rotated: the X server refuses RRSetPanning on a rotated CRTC
-            # (BadMatch). xrandr grows the framebuffer as needed; once this is
-            # the only active output _fit_framebuffer_x11() shrinks it back.
-            if scale_inv != 1.0:
-                self.logger.info(f"Scaling: xrandr scale {scale_inv:.3f} (our scale={scale}), "
-                                 f"physical {native_width}x{native_height}, rotation {rotation}")
+                cmd.extend(['--panning', f'{out_w}x{out_h}'])
+            else:
+                # The X server refuses a panning area on a rotated CRTC
+                # (BadMatch), and xrandr re-sends a CRTC's existing panning on
+                # apply — clear it explicitly. _fit_framebuffer_x11() shrinks
+                # the screen once this is the only active output.
+                cmd.extend(['--panning', '0x0'])
+
+            # Changing one axis up and the other down (landscape <-> portrait)
+            # needs a screen that holds both the old and the new geometry
+            # during the mode set, or RandR answers BadMatch and the output
+            # drops out. Ask for it in the same call: xrandr then disables only
+            # CRTCs that do not fit, and Mutter sees a single screen change.
+            cur = self._get_screen_size_x11()
+            if cur:
+                need_w, need_h = max(cur[0], out_w), max(cur[1], out_h)
+                if (need_w, need_h) != cur:
+                    cmd.extend(['--fb', f'{need_w}x{need_h}'])
         else:
             cmd.extend(['--auto', '--pos', '0x0'])
 
-        if native_width and native_height and rotation != 'normal':
-            # A rotated CRTC needs a framebuffer tall enough *before* the mode
-            # set, otherwise RandR answers BadMatch and the output drops out.
-            # Grow it to cover both the current screen and the rotated output;
-            # _fit_framebuffer_x11() shrinks it again once this output is alone.
-            try:
-                cur = self._get_screen_size_x11() or (0, 0)
-                need_w = max(cur[0], int(native_height * scale_inv))
-                need_h = max(cur[1], int(native_width * scale_inv))
-                subprocess.run(['xrandr', '--fb', f'{need_w}x{need_h}'], capture_output=True, timeout=5)
-            except Exception as e:
-                self.logger.warning(f"Framebuffer pre-grow failed: {e}")
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        except subprocess.TimeoutExpired:
+            # The server may well have applied it; let the caller verify
+            self.logger.warning("xrandr timed out; verifying the result anyway")
+            return True
         if result.returncode != 0:
             self.logger.warning(f"xrandr returned {result.returncode}: {result.stderr.strip()}")
 
@@ -523,7 +530,14 @@ class DisplayManager:
             return False
 
         if expect_active:
+            actual_rotation = self._get_display_rotation_x11(display_name)
+            if actual_rotation != rotation:
+                self.logger.warning(f"Rotation mismatch on {display_name}: expected {rotation}, got {actual_rotation}")
+                return False
             geometry = self._get_display_geometry_x11(display_name)
+            if geometry and (abs(geometry['x']) > 1 or abs(geometry['y']) > 1):
+                self.logger.warning(f"{display_name} is at ({geometry['x']},{geometry['y']}), expected the origin")
+                return False
             expected = self._expected_x11_size(display_name, scale, rotation)
             if geometry and expected:
                 expected_w, expected_h = expected
@@ -538,15 +552,26 @@ class DisplayManager:
         return True
 
     def _reset_display_to_native_baseline(self, display_name):
-        """Reset a display to native resolution at 1.0 scale before retrying."""
-        self.logger.info(f"Resetting {display_name} to native baseline before retry")
+        """Prepare a display for a retry.
+
+        Only turns it off when another output is active: switching off the
+        only output blanks every panel (and GNOME/GTK4 react to zero outputs).
+        Alone, the pinned panning is cleared instead and the enable is simply
+        re-applied in place (with --fb covering both geometries).
+        """
+        others = [c for c in (self.OLED_CONNECTOR, self.EINK_CONNECTOR) if c != display_name]
         try:
-            subprocess.run(
-                ['xrandr', '--output', display_name, '--off'],
-                capture_output=True, timeout=5)
+            if any(self._is_display_active_x11(o) for o in others):
+                self.logger.info(f"Resetting {display_name} (off) before retry")
+                subprocess.run(['xrandr', '--output', display_name, '--off'],
+                               capture_output=True, timeout=5)
+            else:
+                self.logger.info(f"{display_name} is the only output: clearing panning before retry (no --off)")
+                subprocess.run(['xrandr', '--output', display_name, '--panning', '0x0'],
+                               capture_output=True, timeout=5)
             time.sleep(0.3)
         except Exception as e:
-            self.logger.warning(f"Reset to baseline failed: {e}")
+            self.logger.warning(f"Reset before retry failed: {e}")
 
     def _enable_display_x11(self, display_name, scale=None, rotation='normal'):
         """Enable a display using xrandr with optional scaling and rotation."""

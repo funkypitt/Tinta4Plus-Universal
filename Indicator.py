@@ -105,7 +105,7 @@ class Indicator:
             getattr(gui, method)(*args, timeout=5)
         except dbus.DBusException as e:
             log.warning(f"{method} failed: {e}")
-        GLib.timeout_add(300, self.refresh)
+        GLib.timeout_add(300, lambda: (self.refresh(), False)[1])  # one-shot: refresh() returns True
 
     def _ensure_gui(self, hidden):
         """Start the control window if it is not running."""

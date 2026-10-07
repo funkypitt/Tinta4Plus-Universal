@@ -154,8 +154,8 @@ class ResumeCheck:
             results.append(f"Warning: could not read geometry for {connector}")
             return results
 
-        # Position check — should be at origin
-        if geom['x'] != 0 or geom['y'] != 0:
+        # Position check — should be at origin (rotated CRTCs may report x=-1)
+        if abs(geom['x']) > 1 or abs(geom['y']) > 1:
             self.logger.warning(
                 f"ResumeCheck: {connector} at offset "
                 f"({geom['x']},{geom['y']}), repositioning to (0,0)")
@@ -214,12 +214,16 @@ class ResumeCheck:
                 m = re.match(r'^(\S+)\s+connected', line)
                 if m:
                     current_display = m.group(1)
-                    continue
-                # Look for panning info in mode lines
-                if current_display and 'panning' in line.lower():
-                    issues.append(
-                        f"Warning: {current_display} has panning enabled "
-                        f"(may cause scrolling desktop)")
+                # xrandr prints "panning WxH+X+Y" on the connected line itself.
+                # We pin panning to the mode size ourselves; only a panning
+                # area larger than the geometry means a scrolling desktop.
+                pm = re.search(r'(\d+)x(\d+)\+-?\d+\+-?\d+.*panning (\d+)x(\d+)', line)
+                if current_display and pm:
+                    gw, gh, pw, ph = (int(v) for v in pm.groups())
+                    if (pw, ph) != (gw, gh):
+                        issues.append(
+                            f"Warning: {current_display} panning {pw}x{ph} exceeds its {gw}x{gh} geometry "
+                            f"(scrolling desktop)")
             return issues
         except Exception as e:
             return [f"Warning: panning check failed: {e}"]

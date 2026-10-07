@@ -462,6 +462,12 @@ class EInkControlGUI:
         self._last_switch_done = 0.0
         self._eink_mode = None           # 'dynamic' | 'reading' | None
         self._reader_on = False          # tablet reader mode active (thread-safe mirror)
+        # (output, rotation) we last *verifiably* applied; the watchdog and the
+        # final checks enforce this, never the T-CON state (a failed switch
+        # back can leave the T-CON on while the desktop is rightly on the OLED)
+        self._layout_target = None
+        self._layout_corrections = 0     # consecutive watchdog corrections (backoff)
+        self._lid_closed_during_switch = False
         self._reader_rotation = 'left'
         self._lid_inhibit_fd = None      # logind handle-lid-switch inhibitor
         self._idle_inhibit_cookie = None # org.freedesktop.ScreenSaver inhibitor
@@ -601,7 +607,10 @@ class EInkControlGUI:
             return defaults
 
     def save_settings(self):
-        """Save current settings to configuration file"""
+        """Save current settings to configuration file (main thread; workers are marshalled)"""
+        if not self._on_main_thread():
+            self._ui(self.save_settings)
+            return
         try:
             os.makedirs(self.CONFIG_DIR, exist_ok=True)
             settings = {
@@ -1473,6 +1482,7 @@ class EInkControlGUI:
     def _after_connect(self):
         self.check_ec_status()
         self._sync_state_from_helper()
+        self._adopt_layout_from_reality()
         self._schedule_startup_check()
 
     def _sync_state_from_helper(self):
@@ -1805,13 +1815,23 @@ class EInkControlGUI:
                 error = f"unexpected error: {e}"
             finally:
                 self._uninhibit_sleep()
+                if kind in ('oled', 'reader_off'):
+                    self._kill_image_viewer()   # never leave feh behind on an exception
                 if error and kind == 'reader_on' and not self._reader_on:
                     self._release_reader_inhibitors()
+                if error:
+                    self._adopt_layout_from_reality()
                 self._display_lock.release()
-        if not error and kind == 'reader_on' and self._lid_closed:
-            # The lid was closed during the switch: make sure the compositor's
-            # reaction to it did not undo the layout we just applied.
-            threading.Timer(2.0, self._reassert_reader_layout).start()
+        if not error and kind == 'reader_on':
+            if self._lid_closed:
+                # The lid was closed during the switch: make sure the compositor's
+                # reaction to it did not undo the layout we just applied.
+                self._schedule_reassert(2.0)
+            elif self._lid_closed_during_switch and self._reader_lid_open_exits:
+                # Closed and re-opened while we were busy: honour the open
+                self.logger.info("Lid was closed and re-opened during the switch — leaving reader mode")
+                self._ui(self._lid_opened_leave_reader)
+        self._lid_closed_during_switch = False
         self._ui(self._switch_finished, kind, error)
 
     def _switch_finished(self, kind, error):
@@ -1947,9 +1967,13 @@ class EInkControlGUI:
 
         self._ui(self._start_refresh_timer)
         self._ui(self._ensure_floating_button, p['floating_button'])
-        self._verify_final_outputs(active=self.DISPLAY_EINK, inactive=self.DISPLAY_OLED, scale=p['scale'],
-                                   rotation=rotation)
-        self.log_message("✓ E-Ink display enabled")
+        if self._verify_final_outputs(active=self.DISPLAY_EINK, inactive=self.DISPLAY_OLED, scale=p['scale'],
+                                      rotation=rotation):
+            self._set_layout_target(self.DISPLAY_EINK, rotation)
+            self.log_message("✓ E-Ink display enabled")
+        else:
+            self._adopt_layout_from_reality()
+            self.log_message("⚠ E-Ink powered, but the output layout could not be verified", level='warning')
 
     # --- disable ---------------------------------------------------------
 
@@ -2048,7 +2072,21 @@ class EInkControlGUI:
         self._restore_dpms_timeouts()
 
         if oled_ok:
-            self._verify_final_outputs(active=self.DISPLAY_OLED, inactive=self.DISPLAY_EINK, scale=restore_scale)
+            verified = self._verify_final_outputs(active=self.DISPLAY_OLED, inactive=self.DISPLAY_EINK, scale=restore_scale)
+            if verified:
+                self._set_layout_target(self.DISPLAY_OLED)
+            else:
+                self._adopt_layout_from_reality()
+        else:
+            # The OLED did not come back and the T-CON is already off: the user
+            # would face two dark panels. Re-power the eInk (still the active
+            # output) so at least one screen shows something, then report.
+            self.log_message("✗ OLED did not come back — re-powering the eInk so a screen stays usable", level='error')
+            if self.execute_helper_command('enable-eink'):
+                self.execute_helper_command('enable-frontlight', brightness_level=p['brightness'])
+                self.execute_helper_command('set-dynamic')
+                self._ui(self._set_eink_on, True)
+            self._adopt_layout_from_reality()
 
         if not oled_ok:
             raise SwitchError(f"could not re-enable {self.DISPLAY_OLED}")
@@ -2070,24 +2108,21 @@ class EInkControlGUI:
             inactive_on = self.display_mgr.is_display_active(inactive)
         except Exception as e:
             self.logger.warning(f"Final output check skipped: {e}")
-            return
-        if active_on and not inactive_on:
-            self.logger.info(f"Final output check: {active} on, {inactive} off — OK")
-            return
+            return True
+        rot_ok = (self.display_mgr.get_display_rotation(active) == rotation) if active_on else False
+        if active_on and not inactive_on and rot_ok:
+            self.logger.info(f"Final output check: {active} on ({rotation}), {inactive} off — OK")
+            return True
 
         self.log_message(f"⚠ Output state drifted after the switch ({active}={'on' if active_on else 'off'}, "
                          f"{inactive}={'on' if inactive_on else 'off'}) — correcting", level='warning')
         self.display_mgr.set_sole_output(active, scale=scale, rotation=rotation)
-        try:
-            active_on = self.display_mgr.is_display_active(active)
-            inactive_on = self.display_mgr.is_display_active(inactive)
-        except Exception:
-            return
-        if active_on and not inactive_on:
+        self.display_mgr.map_touch_to_display(active, rotation=rotation)
+        if self._layout_ok(active, inactive, rotation):
             self.log_message(f"✓ Output state corrected: {active} on, {inactive} off")
-        else:
-            self.log_message(f"✗ Output state still wrong after correction ({active}={'on' if active_on else 'off'}, "
-                             f"{inactive}={'on' if inactive_on else 'off'})", level='error')
+            return True
+        self.log_message(f"✗ Output state still wrong after correction", level='error')
+        return False
 
     # --- tablet reader mode -----------------------------------------------
 
@@ -2112,7 +2147,7 @@ class EInkControlGUI:
             self._enable_eink_sequence(p)
         self._apply_reader_layout(p, on=True)
         if p.get('open_reader_app'):
-            self._ui(self._launch_reader_app)
+            self._launch_reader_app()   # worker thread: the D-Bus call may block for seconds
         self.log_message("✓ Tablet reader mode on — you can close the lid now")
         self._notify("Reader mode ready", "Reading mode, portrait. Open the lid to return to the OLED.",
                      timeout_ms=8000)
@@ -2133,15 +2168,23 @@ class EInkControlGUI:
 
     READER_BUS = ('org.eink.Reader', '/org/eink/Reader', 'org.eink.Reader')
 
+    def _reader_running(self):
+        try:
+            import dbus
+            return bool(dbus.SessionBus().name_has_owner(self.READER_BUS[0]))
+        except Exception:
+            return False
+
     def _reader_call(self, method):
-        """Best-effort call on the running eInk Reader's D-Bus interface; False if none."""
+        """Best-effort call on the running eInk Reader's D-Bus interface; False if none.
+        Worker threads only: a busy reader can make this block for a few seconds."""
         try:
             import dbus
             bus = dbus.SessionBus()
             name, path, iface = self.READER_BUS
             if not bus.name_has_owner(name):
                 return False
-            getattr(dbus.Interface(bus.get_object(name, path), iface), method)(timeout=5)
+            getattr(dbus.Interface(bus.get_object(name, path), iface), method)(timeout=3)
             return True
         except Exception as e:
             self.logger.info(f"Reader {method}: {e}")
@@ -2152,6 +2195,9 @@ class EInkControlGUI:
         `eink-reader --fullscreen` itself forwards to a running instance too)."""
         if self._reader_call('Fullscreen'):
             self.log_message("✓ eInk Reader brought to fullscreen")
+            return
+        if self._reader_running():
+            self.log_message("eInk Reader is running but busy — not starting another copy", level='warning')
             return
         exe = shutil.which(self.READER_APP)
         if not exe:
@@ -2185,6 +2231,12 @@ class EInkControlGUI:
             if self.display_mgr.map_touch_to_display(self.DISPLAY_EINK, rotation=rotation):
                 self.log_message(f"✓ Touch and pen mapped to {self.DISPLAY_EINK} ({rotation})")
             self._schedule_touch_remap(self.DISPLAY_EINK, rotation)
+            if self._layout_ok(self.DISPLAY_EINK, self.DISPLAY_OLED, rotation):
+                self._set_layout_target(self.DISPLAY_EINK, rotation)
+            else:
+                self._adopt_layout_from_reality()
+                if on:
+                    raise SwitchError(f"the eInk did not end up {rotation} as the only output")
 
         if on:
             if self.execute_helper_command('set-reading'):
@@ -2223,7 +2275,7 @@ class EInkControlGUI:
         if not self._display_lock.acquire(timeout=60):
             return
         try:
-            if not self._reader_on:
+            if not self._reader_on or self._closing:
                 return
             rotation = self._reader_rotation
             eink_on = self.display_mgr.is_display_active(self.DISPLAY_EINK)
@@ -2236,7 +2288,13 @@ class EInkControlGUI:
                              f"OLED={'on' if oled_on else 'off'}) — restoring reader layout", level='warning')
             self.display_mgr.set_sole_output(self.DISPLAY_EINK, scale=self.display_scale, rotation=rotation)
             self.display_mgr.map_touch_to_display(self.DISPLAY_EINK, rotation=rotation)
-            self.log_message("✓ Reader layout restored")
+            self._schedule_touch_remap(self.DISPLAY_EINK, rotation)
+            if self._layout_ok(self.DISPLAY_EINK, self.DISPLAY_OLED, rotation):
+                self._set_layout_target(self.DISPLAY_EINK, rotation)
+                self.log_message("✓ Reader layout restored")
+            else:
+                self._adopt_layout_from_reality()
+                self.log_message("✗ Reader layout could not be restored", level='error')
         except Exception as e:
             self.logger.error(f"Reader layout re-assert failed: {e}")
         finally:
@@ -2328,14 +2386,24 @@ class EInkControlGUI:
         if closed == self._lid_closed:
             return
         self._lid_closed = closed
+        if closed and self._switching:
+            self._lid_closed_during_switch = True
         if not self._reader_on:
             return
         self.logger.info(f"Lid {'closed' if closed else 'opened'} in reader mode")
         if closed:
-            # Give the compositor a moment to do whatever it does on lid close, then undo it
-            threading.Timer(2.5, self._reassert_reader_layout).start()
+            self._schedule_reassert(2.5)
         elif self._reader_lid_open_exits:
             self._ui(self._lid_opened_leave_reader)
+
+    def _schedule_reassert(self, delay):
+        """One pending re-assert at a time; daemon so it never outlives the app."""
+        timer = getattr(self, '_lid_reassert_timer', None)
+        if timer is not None:
+            timer.cancel()
+        self._lid_reassert_timer = threading.Timer(delay, self._reassert_reader_layout)
+        self._lid_reassert_timer.daemon = True
+        self._lid_reassert_timer.start()
 
     def _lid_opened_leave_reader(self):
         if not self._reader_on or self._switching or self._closing:
@@ -2369,6 +2437,7 @@ class EInkControlGUI:
         self.save_settings()
         if self._reader_on and not self._switching:
             threading.Thread(target=self._reassert_reader_layout, daemon=True, name='reader-rotate').start()
+            self._schedule_touch_remap(self.DISPLAY_EINK, rotation)
 
     def _set_theme(self, theme):
         """Apply a desktop theme; never let a theme failure abort a switch."""
@@ -2766,11 +2835,30 @@ class EInkControlGUI:
         threading.Thread(target=self._layout_watchdog_loop, daemon=True, name='layout-watchdog').start()
 
     def _expected_layout(self):
-        """(active, inactive, rotation) for the current state."""
-        if self._eink_on:
-            return (self.DISPLAY_EINK, self.DISPLAY_OLED,
-                    self._reader_rotation if self._reader_on else 'normal')
-        return (self.DISPLAY_OLED, self.DISPLAY_EINK, 'normal')
+        """(active, inactive, rotation): the last layout we verifiably applied."""
+        if self._layout_target is None:
+            return None
+        active, rotation = self._layout_target
+        inactive = self.DISPLAY_EINK if active == self.DISPLAY_OLED else self.DISPLAY_OLED
+        return (active, inactive, rotation)
+
+    def _set_layout_target(self, active, rotation='normal'):
+        self._layout_target = (active, rotation)
+        self._layout_corrections = 0
+
+    def _adopt_layout_from_reality(self):
+        """After a failed or uncertain switch: enforce what is actually on screen."""
+        try:
+            if self.display_mgr.is_display_active(self.DISPLAY_EINK) and not self.display_mgr.is_display_active(self.DISPLAY_OLED):
+                self._layout_target = (self.DISPLAY_EINK, self.display_mgr.get_display_rotation(self.DISPLAY_EINK))
+            elif self.display_mgr.is_display_active(self.DISPLAY_OLED):
+                self._layout_target = (self.DISPLAY_OLED, 'normal')
+            else:
+                self._layout_target = None
+            self.logger.info(f"Layout target adopted from the current state: {self._layout_target}")
+        except Exception as e:
+            self.logger.warning(f"Could not read the display state: {e}")
+            self._layout_target = None
 
     def _layout_watchdog_loop(self):
         while not self._layout_watchdog_stop.wait(self.LAYOUT_WATCHDOG_S):
@@ -2779,42 +2867,58 @@ class EInkControlGUI:
                     or time.monotonic() - self._last_switch_done < 2 * self.LAYOUT_WATCHDOG_S):
                 self._layout_mismatches = 0
                 continue
-            try:
-                active, inactive, rotation = self._expected_layout()
-                ok = (self.display_mgr.is_display_active(active)
-                      and not self.display_mgr.is_display_active(inactive))
-            except Exception as e:
-                self.logger.debug(f"layout watchdog: {e}")
+            expected = self._expected_layout()
+            if expected is None:
                 continue
-            if ok:
+            active, inactive, rotation = expected
+            if not self._layout_ok(active, inactive, rotation):
+                self._layout_mismatches += 1
+            else:
                 self._layout_mismatches = 0
                 continue
-            self._layout_mismatches += 1
             if self._layout_mismatches < self.LAYOUT_WATCHDOG_CONFIRM:
                 continue
             self._layout_mismatches = 0
+            if self._layout_corrections >= 3:
+                # GNOME keeps undoing us: stop fighting (log once) until the next switch
+                if self._layout_corrections == 3:
+                    self._layout_corrections += 1
+                    self.log_message("✗ The desktop keeps changing the display layout; giving up until the next "
+                                     "switch (use Super+P / the button to re-apply)", level='error')
+                continue
             self._correct_layout(active, inactive, rotation)
+
+    def _layout_ok(self, active, inactive, rotation):
+        try:
+            if not self.display_mgr.is_display_active(active) or self.display_mgr.is_display_active(inactive):
+                return False
+            return self.display_mgr.get_display_rotation(active) == rotation
+        except Exception as e:
+            self.logger.debug(f"layout check: {e}")
+            return True  # unknown: do not act on it
 
     def _correct_layout(self, active, inactive, rotation):
         """Worker: re-apply the expected output layout (under the display lock)."""
         if not self._display_lock.acquire(timeout=10):
             return
         try:
-            if self._switching:
-                return
-            self.log_message(f"⚠ Desktop changed the display layout behind our back "
-                             f"({inactive} came on) — restoring {active}", level='warning')
+            if self._switching or self._closing or self._layout_ok(active, inactive, rotation):
+                return  # someone else fixed it while we waited
+            self._layout_corrections += 1
+            self.log_message(f"⚠ Desktop changed the display layout behind our back — restoring {active}"
+                             + (f" ({rotation})" if rotation != 'normal' else ""), level='warning')
             scale = self.display_scale if active == self.DISPLAY_EINK else (self.saved_oled_scale or 1.0)
             self.display_mgr.set_sole_output(active, scale=scale, rotation=rotation)
             self.display_mgr.map_touch_to_display(active, rotation=rotation)
-            if (self.display_mgr.is_display_active(active)
-                    and not self.display_mgr.is_display_active(inactive)):
+            self._schedule_touch_remap(active, rotation)
+            if self._layout_ok(active, inactive, rotation):
                 self.log_message(f"✓ Display layout restored ({active} only)")
             else:
                 self.log_message("✗ Could not restore the display layout", level='error')
         except Exception as e:
             self.logger.error(f"layout correction failed: {e}")
         finally:
+            self._last_switch_done = time.monotonic()  # cooldown before the next check
             self._display_lock.release()
 
     # ------------------------------------------------------------------
@@ -2839,7 +2943,7 @@ class EInkControlGUI:
             self.logger.warning(f"{label}: skipped, a display operation is still running")
             return
         try:
-            expect_eink = self._eink_on
+            expect_eink = (self._layout_target[0] == self.DISPLAY_EINK) if self._layout_target else self._eink_on
             self.logger.info(f"{label}: running (expect_eink={expect_eink})")
             checker = ResumeCheck(self.display_mgr, self.logger)
             results = checker.run(
@@ -2854,6 +2958,7 @@ class EInkControlGUI:
                 self.log_message(f"{label}: {summary}", level='warning')
             else:
                 self.logger.info(f"{label}: all OK")
+            self._adopt_layout_from_reality()
         except Exception as e:
             self.logger.error(f"{label} failed: {e}")
         finally:
@@ -2949,11 +3054,17 @@ class EInkControlGUI:
             self._on_lid_changed(bool(changed['LidIsClosed']))
 
     def _on_prepare_for_sleep(self, going_to_sleep):
-        """D-Bus signal handler for PrepareForSleep (runs on the monitor thread)."""
+        """D-Bus signal handler for PrepareForSleep (runs on the monitor thread).
+
+        The work goes to its own thread: this thread also dispatches UPower
+        lid signals and the indicator's D-Bus calls, which must not wait
+        behind a display check."""
         if not going_to_sleep:
             self.logger.info("System resumed from suspend (PrepareForSleep=false)")
-            time.sleep(2.0)  # let the display subsystem stabilise
-            self._on_system_resume()
+            def resume():
+                time.sleep(2.0)  # let the display subsystem stabilise
+                self._on_system_resume()
+            threading.Thread(target=resume, daemon=True, name='resume-check').start()
 
     def _on_system_resume(self):
         """After wake from suspend / lid open: fix displays, then refresh the T-CON handle."""
