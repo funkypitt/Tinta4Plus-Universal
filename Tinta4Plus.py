@@ -3326,8 +3326,40 @@ def _setup_logging():
     return logging.getLogger('tinta4plusu-gui')
 
 
+def _report_startup_failure(logger):
+    """Show a startup crash in a dialog: launched from the menu there is no
+    terminal, and the window simply never appearing tells the user nothing."""
+    import traceback
+    details = traceback.format_exc()
+    try:
+        logger.critical("Startup failed", exc_info=True)
+    except Exception:
+        pass
+    print(details, file=sys.stderr)
+    try:
+        root = tk._default_root or tk.Tk(className='tinta4plusu')
+        root.withdraw()
+        messagebox.showerror(
+            "Tinta4PlusU could not start",
+            "Tinta4PlusU ran into an error while starting:\n\n"
+            f"{details.strip().splitlines()[-1]}\n\n"
+            f"Details are in {EInkControlGUI.LOG_FILE}")
+    except Exception:
+        pass  # no display at all: the log and stderr are all we have
+
+
 def main():
-    """Entry point"""
+    """Entry point: run the app, and never fail silently while starting."""
+    try:
+        _run()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception:
+        _report_startup_failure(logging.getLogger('tinta4plusu-gui'))
+        sys.exit(1)
+
+
+def _run():
     autostart = '--autostart' in sys.argv
     start_hidden = '--hidden' in sys.argv      # used by the indicator's login autostart
     # Developer mode: no helper, no display changes. Optional =connected / =eink
@@ -3365,7 +3397,9 @@ def main():
         root.withdraw()
         messagebox.showinfo("Tinta4PlusU already running",
                             "Tinta4PlusU is already running.\n\n"
-                            "Look for the existing \"ThinkBook E-Ink Control\" window.")
+                            "Look for the existing \"ThinkBook E-Ink Control\" window. "
+                            "If it is hidden, choose \"Open control window\" in the "
+                            "top-bar indicator, or \"Quit Tinta4PlusU\" there and start it again.")
         root.destroy()
         sys.exit(0)
 
@@ -3374,6 +3408,13 @@ def main():
     # showing a generic "tk" app.
     root = tk.Tk(className='tinta4plusu')
     root.withdraw()  # Hide the main window initially
+
+    # Errors inside Tk callbacks go to stderr by default, which nobody sees
+    # when the app is started from the menu: put them in the log as well.
+    def log_callback_exception(exc_type, exc_value, exc_traceback):
+        logger.error("Error in a UI callback", exc_info=(exc_type, exc_value, exc_traceback))
+
+    root.report_callback_exception = log_callback_exception
 
     # Check disclaimer agreement BEFORE showing the main window
     if not show_disclaimer_dialog(root):

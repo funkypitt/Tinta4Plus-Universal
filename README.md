@@ -283,6 +283,12 @@ If the first one shows no dialog, see the pkexec section below. If the second pr
 
 When asking for help, include the last lines of the app's Activity tab (there is a **Copy** button) and the output of `tail -30 /var/log/tinta4plusu-helper.log` (helper) and `tail -30 ~/.cache/Tinta4PlusU/gui.log` (GUI).
 
+### The control window does not appear
+
+- On the very first launch a licence window opens first. The control window only appears after you scroll to the end of the text and click **Agree**.
+- The app may already be running with its window hidden (the top-bar indicator starts it that way at login). Choose **Open control window** in the indicator, or **Quit Tinta4PlusU** there and start it again.
+- If the app fails while starting, it now says why in a dialog. The same error is in `~/.cache/Tinta4PlusU/gui.log`; running `tinta4plusu` from a terminal shows it too.
+
 ### eInk commands fail with "E-Ink T-CON not available"
 
 The T-CON USB device (`048d:8957`) was not found. The helper still starts and the frontlight still works. The helper looks for the T-CON again on every eInk command and after resume, so once `lsusb | grep 048d` shows the device, retry. If the device is missing after suspend, close the lid, wait a few seconds and reopen it.
