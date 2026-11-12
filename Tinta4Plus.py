@@ -3156,6 +3156,37 @@ class EInkControlGUI:
 # Startup helpers
 # ----------------------------------------------------------------------
 
+def _monitor_for_dialog(window):
+    """(x, y, width, height) of the monitor a first dialog should open on:
+    the one under the pointer, else the primary, else the first. None when
+    the monitors cannot be listed (the window manager then places it)."""
+    import re
+    try:
+        out = subprocess.run(['xrandr', '--listactivemonitors'],
+                             capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    monitors = []          # (is_primary, x, y, w, h)
+    for line in out.splitlines():
+        m = re.match(r'\s*\d+:\s+\+(\*?)\S+\s+(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)', line)
+        if m and int(m.group(2)) > 0 and int(m.group(3)) > 0:
+            monitors.append((bool(m.group(1)), int(m.group(4)), int(m.group(5)),
+                             int(m.group(2)), int(m.group(3))))
+    if not monitors:
+        return None
+    try:
+        px, py = window.winfo_pointerxy()
+    except tk.TclError:
+        px = py = -1
+    for _, x, y, w, h in monitors:
+        if x <= px < x + w and y <= py < y + h:
+            return (x, y, w, h)
+    for primary, x, y, w, h in monitors:
+        if primary:
+            return (x, y, w, h)
+    return monitors[0][1:]
+
+
 def show_disclaimer_dialog(parent):
     """Show disclaimer dialog on first launch. Returns True if user agrees, False otherwise."""
     eula_file = os.path.join(_base_dir(), "README_EULA_INSTRUCTIONS_WARNINGS.txt")
@@ -3180,42 +3211,14 @@ def show_disclaimer_dialog(parent):
     if os.path.exists(agree_file):
         return True  # User has already agreed
 
-    # Create a custom EULA dialog
-    dialog = tk.Toplevel(parent)
+    # Create a custom EULA dialog. It is a window of its own, not a transient
+    # of `parent`: the root is still withdrawn at this point, and Tk never
+    # maps a transient whose master is withdrawn — the EULA stayed invisible
+    # (state "withdrawn") on first launch. No grab either: nothing else of
+    # ours is on screen to be kept away from.
+    dialog = tk.Toplevel(parent, class_='Tinta4plusu')
+    dialog.withdraw()                      # built and placed first, shown once
     dialog.title("End User License Agreement")
-    dialog.geometry("900x750")
-    dialog.resizable(False, False)
-
-    # Disable the close button (X) - user must click Agree or Disagree
-    dialog.protocol("WM_DELETE_WINDOW", lambda: None)
-
-    # Make dialog modal
-    dialog.transient(parent)
-    dialog.grab_set()
-
-    # Center the dialog on screen
-    dialog.update_idletasks()
-    x = (dialog.winfo_screenwidth() // 2) - (900 // 2)
-    y = (dialog.winfo_screenheight() // 2) - (750 // 2)
-    dialog.geometry(f"900x750+{x}+{y}")
-
-    main_frame = ttk.Frame(dialog, padding="20")
-    main_frame.pack(fill=tk.BOTH, expand=True)
-
-    ttk.Label(main_frame, text="End User License Agreement",
-              font=('TkDefaultFont', 14, 'bold')).pack(pady=(0, 10))
-    ttk.Label(main_frame,
-              text="Please read the following agreement carefully before using this software.",
-              font=('TkDefaultFont', 10)).pack(pady=(0, 10))
-
-    text_frame = ttk.Frame(main_frame)
-    text_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
-
-    text_widget = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD, font=('TkDefaultFont', 10),
-                                            padx=10, pady=10)
-    text_widget.pack(fill=tk.BOTH, expand=True)
-    text_widget.insert('1.0', DISCLAIMER_TEXT)
-    text_widget.config(state=tk.DISABLED)
 
     result = {'agreed': False}
 
@@ -3227,13 +3230,73 @@ def show_disclaimer_dialog(parent):
         result['agreed'] = False
         dialog.destroy()
 
+    # Closing the window declines, like "I Disagree"
+    dialog.protocol("WM_DELETE_WINDOW", on_disagree)
+
+    main_frame = ttk.Frame(dialog, padding="20")
+    main_frame.pack(fill=tk.BOTH, expand=True)
+
+    ttk.Label(main_frame, text="End User License Agreement",
+              font=('TkDefaultFont', 14, 'bold')).pack(side=tk.TOP, pady=(0, 10))
+    ttk.Label(main_frame,
+              text="Please read the following agreement carefully before using this software.",
+              font=('TkDefaultFont', 10)).pack(side=tk.TOP, pady=(0, 10))
+
+    # The buttons are packed before the text: the packer serves widgets in
+    # order, and the text area asks for more height than a small or HiDPI
+    # screen has (its font is in points, the window in pixels). Packed last,
+    # the buttons were left with no room at all and could not be reached.
     button_frame = ttk.Frame(main_frame)
-    button_frame.pack(fill=tk.X)
+    button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(15, 0))
     ttk.Button(button_frame, text="I Disagree", command=on_disagree, width=15).pack(side=tk.LEFT, padx=(0, 10))
     ttk.Button(button_frame, text="I Agree", command=on_agree, width=15,
                style='Accent.TButton' if HAS_SV_TTK else 'TButton').pack(side=tk.RIGHT)
 
-    dialog.focus_set()
+    text_frame = ttk.Frame(main_frame)
+    text_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    # Sized in characters, so the window follows the font whatever the DPI
+    text_widget = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD, font=('TkDefaultFont', 10),
+                                            width=88, height=26, padx=10, pady=10)
+    text_widget.pack(fill=tk.BOTH, expand=True)
+    text_widget.insert('1.0', DISCLAIMER_TEXT)
+    text_widget.config(state=tk.DISABLED)
+
+    # Natural size, capped to the monitor it opens on (the one under the
+    # pointer). winfo_screenwidth() spans every monitor: centring on it put
+    # the dialog across the seam between the OLED and the eInk.
+    dialog.update_idletasks()
+    want_w, want_h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
+    monitor = _monitor_for_dialog(dialog)
+    if monitor:
+        mon_x, mon_y, mon_w, mon_h = monitor
+    else:
+        mon_x, mon_y = 0, 0
+        mon_w, mon_h = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
+    # Margins leave room for panels and the title bar
+    width = max(320, min(want_w, mon_w - 80))
+    height = max(240, min(want_h, mon_h - 140))
+    if monitor:
+        x = mon_x + (mon_w - width) // 2
+        y = mon_y + max(0, (mon_h - height) // 2 - 20)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+    else:
+        dialog.geometry(f"{width}x{height}")   # the window manager picks the place
+    dialog.minsize(min(480, width), min(360, height))
+    dialog.resizable(True, True)
+
+    # Show it, in front: a window opened by a program without a visible
+    # window of its own may otherwise land behind the active one.
+    dialog.deiconify()
+    dialog.lift()
+    try:
+        dialog.attributes('-topmost', True)
+        dialog.after(1500, lambda: dialog.winfo_exists() and dialog.attributes('-topmost', False))
+    except tk.TclError:
+        pass
+    dialog.focus_force()
+    text_widget.focus_set()                # arrow keys / Page Down scroll the text
+
     dialog.wait_window()
 
     if result['agreed']:

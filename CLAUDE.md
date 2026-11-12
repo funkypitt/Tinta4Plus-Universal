@@ -136,6 +136,16 @@ The GUI exposes a "Privacy image" dropdown (under Display Control) that lets the
 
 Image resolution in frozen mode uses `sys._MEIPASS` (PyInstaller `_internal/` directory).
 
+### First-run EULA dialog (`show_disclaimer_dialog`)
+
+Shown before the main window, while the root is still withdrawn. Three rules, each from a tester report (Mint 22.3 Cinnamon, Nov 2026):
+
+- **Never `transient(root)` (nor a grab) on it**: Tk does not map a transient whose master is withdrawn — the dialog stayed in state `withdrawn` and the first launch showed nothing at all.
+- **Buttons are packed before the text area** (`side=BOTTOM`), and the text is sized in characters. The window is in pixels but the fonts are in points (Xft.dpi): at 192 dpi the text area alone asked for more than the old fixed 900x750 and the packer left the buttons no room.
+- **Placed on one monitor** (`_monitor_for_dialog`: under the pointer, else primary, from `xrandr --listactivemonitors`; no xrandr → the window manager places it). `winfo_screenwidth()` spans both panels, so centring on it straddled the OLED/eInk seam.
+
+Testable without the hardware: Xvfb (`-dpi 192`, `Xft.dpi` via xrdb) + a window manager, `HOME` pointed at an empty directory, `--ui-preview`.
+
 ### Keyboard shortcuts
 
 - **Super+P** (Fn+F7): Toggle eInk/OLED — always active when daemon is running. The listener grabs the keyboard device so the DE's display projection dialog is suppressed. 2-second debounce prevents rapid fire.
