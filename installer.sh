@@ -10,6 +10,7 @@ BIN_DIR="/usr/local/bin"
 DESKTOP_DIR="/usr/share/applications"
 AUTOSTART_DIR="/etc/xdg/autostart"
 POLKIT_DIR="/usr/share/polkit-1/actions"
+ICON_THEME_DIR="/usr/share/icons/hicolor"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_MODE=""  # "binary" or "script"
 LOG_FILE="/tmp/tinta4plusu-install.log"
@@ -60,6 +61,8 @@ do_uninstall() {
     rm -f  "${BIN_DIR}/toggle-eink"
     rm -f  "${BIN_DIR}/tinta4plusu-indicator"
     rm -rf "${INSTALL_DIR}"
+    rm -f  "${ICON_THEME_DIR}"/scalable/status/tinta4plusu-*-symbolic.svg
+    gtk-update-icon-cache -q -t -f "${ICON_THEME_DIR}" 2>/dev/null || true
     rm -f  "${DESKTOP_DIR}/tinta4plusu.desktop"
     rm -f  "${AUTOSTART_DIR}/tinta4plusu-autostart.desktop"
     rm -f  "${AUTOSTART_DIR}/tinta4plusu-indicator.desktop"
@@ -480,6 +483,11 @@ install_indicator_files() {
     mkdir -p "${INSTALL_DIR}/icons"
     cp "${SCRIPT_DIR}/Indicator.py" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}"/icons/tinta4plusu-*-symbolic.svg "${INSTALL_DIR}/icons/"
+    # Also in the system icon theme: Cinnamon's tray (Linux Mint) shows a blank
+    # space for a symbolic icon that only exists in the indicator's own folder.
+    install -d -m 755 "${ICON_THEME_DIR}/scalable/status"
+    install -m 644 "${SCRIPT_DIR}"/icons/tinta4plusu-*-symbolic.svg "${ICON_THEME_DIR}/scalable/status/"
+    gtk-update-icon-cache -q -t -f "${ICON_THEME_DIR}" 2>/dev/null || true
     cat > "${BIN_DIR}/tinta4plusu-indicator" << 'WRAPPER'
 #!/bin/bash
 exec /usr/bin/python3 /opt/tinta4plusu/Indicator.py "$@"
