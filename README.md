@@ -177,6 +177,7 @@ These shortcuts work system-wide (via evdev in the helper daemon) whenever the d
 |----------|--------|------|
 | **Super+P** (Fn+F7) | Toggle eInk/OLED | Always (daemon running) |
 | **Super+Shift+P** | Tablet reader mode on/off | Always (daemon running) |
+| **Super+Ctrl+P** | eInk mode: Dynamic ↔ Reading | eInk enabled |
 | **Help** (Fn+F9) | Refresh eInk (clear ghosts) | eInk enabled |
 | **Brightness Up** (Fn+F6) | Increase frontlight brightness | eInk enabled |
 | **Brightness Down** (Fn+F5) | Decrease frontlight brightness | eInk enabled |

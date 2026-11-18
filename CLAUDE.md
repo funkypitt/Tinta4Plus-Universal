@@ -150,13 +150,14 @@ Testable without the hardware: Xvfb (`-dpi 192`, `Xft.dpi` via xrdb) + a window 
 
 - **Super+P** (Fn+F7): Toggle eInk/OLED — always active when daemon is running. The listener grabs the keyboard device so the DE's display projection dialog is suppressed. 2-second debounce prevents rapid fire.
 - **Super+Shift+P**: Tablet reader mode on/off (listener tracks Shift state; Shift itself is forwarded)
+- **Super+Ctrl+P**: eInk mode Dynamic ↔ Reading — only when eInk enabled (Ctrl tracked like Shift; 0.7 s debounce). Handled entirely in the daemon (`_hotkey_mode`, a pure T-CON command), which tracks `eink_mode` (set by `set-dynamic` / `set-reading`, cleared by `enable-eink` / `disable-eink`, reported in `get-state`) and tells the GUI with a `{'type': 'mode'}` notification
 - **Help** (Fn+F9): Refresh eInk (clear ghosts) — only when eInk enabled
 - **XF86MonBrightnessUp** (Fn+F6): Increase frontlight brightness — only when eInk enabled
 - **XF86MonBrightnessDown** (Fn+F5): Decrease frontlight brightness — only when eInk enabled
 
 These work both in the tkinter GUI (`bind_all`) and globally via `GlobalHotkeyListener` (evdev, runs in the helper daemon as root). The listener holds Super back until it knows whether P follows; any other key (or a Super auto-repeat) first injects the pending Super-down so Super+L / Super+Tab / Super+drag reach the desktop intact. Brightness/Help keys are only swallowed when the daemon callback returns True (eInk on); otherwise they pass through to the desktop. Callbacks' hardware work runs on a worker thread (`run_async`) so key forwarding never stalls. Its own `tinta4plusu-fwd-*` UInput mirrors are skipped when scanning devices.
 
-Hotkeys reach the GUI as daemon *notifications* (`{'type': 'toggle' | 'reader' | 'brightness' | 'refresh'}`). The GUI long-polls for them on a **second** socket connection (`wait-notifications`, `_notify_loop`, 20 s per poll), so they arrive at once; the 5 s keepalive still drains the queue as a fallback (older daemon, poll connection down). The long-poll is not counted as a busy command (the watchdog must still fire when the GUI dies) and a waiter whose client has disconnected leaves the queue alone (`_peer_gone`). `HelperClient.close()` does `shutdown()` first — `close()` alone does not wake a thread blocked in `recv()`.
+Hotkeys reach the GUI as daemon *notifications* (`{'type': 'toggle' | 'reader' | 'brightness' | 'refresh' | 'mode'}`). The GUI long-polls for them on a **second** socket connection (`wait-notifications`, `_notify_loop`, 20 s per poll), so they arrive at once; the 5 s keepalive still drains the queue as a fallback (older daemon, poll connection down). The long-poll is not counted as a busy command (the watchdog must still fire when the GUI dies) and a waiter whose client has disconnected leaves the queue alone (`_peer_gone`). `HelperClient.close()` does `shutdown()` first — `close()` alone does not wake a thread blocked in `recv()`.
 
 ### OLED wake sequence
 

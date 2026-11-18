@@ -5,7 +5,8 @@ Runs in background threads, reading keyboard events from /dev/input
 without requiring window focus.
 
 The Super+P combo (Fn+F7 on ThinkBook) is always active and triggers
-the display toggle callback.  The brightness and Help keys are only
+the display toggle callback; Super+Shift+P toggles tablet reader mode
+and Super+Ctrl+P switches the eInk mode (Dynamic / Reading).  The brightness and Help keys are only
 consumed when the daemon callback reports that it handled them (i.e.
 while the eInk display is enabled); otherwise they pass through so the
 desktop's own OLED brightness handling keeps working.
@@ -55,12 +56,15 @@ COMBO_KEYS = {
     'KEY_P',
 }
 SHIFT_KEYS = ('KEY_LEFTSHIFT', 'KEY_RIGHTSHIFT')
+CTRL_KEYS = ('KEY_LEFTCTRL', 'KEY_RIGHTCTRL')
 
 # Name prefix of the UInput mirrors this module creates
 FORWARDER_PREFIX = 'tinta4plusu-fwd-'
 
 # Minimum time between two Super+P toggles
 TOGGLE_DEBOUNCE_S = 2.0
+# Minimum time between two Super+Ctrl+P eInk mode changes
+MODE_DEBOUNCE_S = 0.7
 
 KEY_DOWN, KEY_UP, KEY_REPEAT = 1, 0, 2
 
@@ -75,14 +79,17 @@ class GlobalHotkeyListener:
     """
 
     def __init__(self, logger, on_brightness_up=None, on_brightness_down=None,
-                 on_refresh=None, on_toggle=None, on_reader=None):
+                 on_refresh=None, on_toggle=None, on_reader=None, on_mode=None):
         self.logger = logger
         self.on_brightness_up = on_brightness_up
         self.on_brightness_down = on_brightness_down
         self.on_refresh = on_refresh
         self.on_toggle = on_toggle
         self.on_reader = on_reader          # Super+Shift+P: tablet reader mode
+        self.on_mode = on_mode              # Super+Ctrl+P: eInk mode Dynamic <-> Reading
         self._shift_held = False
+        self._ctrl_held = False
+        self._last_mode_time = 0.0
         self._running = False
         self._threads = []
         self._devices = []
@@ -227,12 +234,18 @@ class GlobalHotkeyListener:
         """
         code, value = event.code, event.value
 
-        # Shift is only tracked (never consumed) so Super+Shift+P can be told apart
+        # Shift and Ctrl are only tracked (never consumed) so Super+Shift+P
+        # and Super+Ctrl+P can be told apart from Super+P
         if code in self._shift_codes():
             if value == KEY_DOWN:
                 self._shift_held = True
             elif value == KEY_UP:
                 self._shift_held = False
+        elif code in self._ctrl_codes():
+            if value == KEY_DOWN:
+                self._ctrl_held = True
+            elif value == KEY_UP:
+                self._ctrl_held = False
 
         # --- Super (left meta) ------------------------------------------
         if code == ecodes.KEY_LEFTMETA:
@@ -263,7 +276,12 @@ class GlobalHotkeyListener:
                 self._super_used_in_combo = True
                 self._super_pending = False
                 now = time.monotonic()
-                if now - self._last_toggle_time > TOGGLE_DEBOUNCE_S:
+                if self._ctrl_held and self.on_mode:
+                    if now - self._last_mode_time > MODE_DEBOUNCE_S:
+                        self._last_mode_time = now
+                        self.logger.info("GlobalHotkeyListener: Super+Ctrl+P eInk mode switch detected")
+                        self._dispatch(self.on_mode)
+                elif now - self._last_toggle_time > TOGGLE_DEBOUNCE_S:
                     self._last_toggle_time = now
                     if self._shift_held and self.on_reader:
                         self.logger.info("GlobalHotkeyListener: Super+Shift+P reader toggle detected")
@@ -309,6 +327,10 @@ class GlobalHotkeyListener:
     @staticmethod
     def _shift_codes():
         return tuple(getattr(ecodes, k) for k in SHIFT_KEYS if hasattr(ecodes, k))
+
+    @staticmethod
+    def _ctrl_codes():
+        return tuple(getattr(ecodes, k) for k in CTRL_KEYS if hasattr(ecodes, k))
 
     def _flush_pending_super(self, ui):
         """Inject the held-back Super-down so the DE sees it."""

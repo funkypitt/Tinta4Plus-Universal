@@ -1149,6 +1149,7 @@ class EInkControlGUI:
         shortcuts = [
             ("Super+P  (Fn+F7)", "Switch between OLED and eInk — works system-wide while the helper runs"),
             ("Super+Shift+P", "Tablet reader mode on / off"),
+            ("Super+Ctrl+P", "eInk mode: switch between Dynamic and Reading (eInk only)"),
             ("Help  (Fn+F9)", "Full eInk refresh"),
             ("Fn+F5 / Fn+F6", "Frontlight down / up (eInk only; OLED brightness otherwise)"),
             ("Esc", "Cancel a running countdown (this window)"),
@@ -1518,7 +1519,8 @@ class EInkControlGUI:
             self.log_message(f"Helper reports eInk {'enabled' if eink_on else 'disabled'} — syncing")
         self._set_eink_on(eink_on)
         if eink_on:
-            self._eink_mode = None  # unknown; the user can re-apply
+            mode = response.get('eink_mode')   # None from an older daemon
+            self._eink_mode = mode if mode in ('dynamic', 'reading') else None
             if self.floating_button_var.get():
                 self._ensure_floating_button(True)
             self._start_refresh_timer()
@@ -1668,6 +1670,13 @@ class EInkControlGUI:
                     self.log_message(f"Hotkey: brightness set to {level}")
             elif ntype == 'refresh':
                 self.log_message("Hotkey: eInk refresh performed")
+            elif ntype == 'mode':
+                mode = notif.get('mode')
+                if mode in ('dynamic', 'reading') and self._eink_on:
+                    self._eink_mode = mode
+                    self._apply_display_state()
+                    self.log_message(f"Hotkey: eInk mode set to {mode.capitalize()}")
+                    self.update_status(f"E-Ink in {mode.capitalize()} mode")
             elif ntype == 'toggle':
                 toggle_requested = True
 

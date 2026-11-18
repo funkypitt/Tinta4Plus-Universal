@@ -136,6 +136,7 @@ class HelperDaemon:
         # eInk state tracking (for global hotkeys)
         self.eink_enabled = False
         self.brightness_level = 4  # default
+        self.eink_mode = None      # 'dynamic' | 'reading' | None (unknown / eInk off)
         self._pending_notifications = []
         self._notify_cond = threading.Condition()
         # Serializes T-CON USB transfers across socket, hotkey and HTTP threads
@@ -159,6 +160,7 @@ class HelperDaemon:
             on_refresh=self._hotkey_refresh,
             on_toggle=self._hotkey_toggle,
             on_reader=self._hotkey_reader,
+            on_mode=self._hotkey_mode,
         )
 
         # Watchdog — never fires while a command is being handled
@@ -511,6 +513,26 @@ class HelperDaemon:
         self._queue_notification({'type': 'reader'})
         return True
 
+    def _hotkey_mode(self):
+        """Handle Super+Ctrl+P: switch the eInk between Dynamic and Reading mode.
+
+        Runs on the hotkey worker thread. Done here rather than in the GUI
+        because it is a pure T-CON command; the GUI is told the new mode.
+        """
+        if not (self.eink_enabled and self.eink):
+            self.logger.info("Hotkey: eInk mode switch ignored (eInk is off)")
+            return True
+        new_mode = 'dynamic' if self.eink_mode == 'reading' else 'reading'
+        try:
+            self._eink_op(self.eink.set_reading_mode if new_mode == 'reading'
+                          else self.eink.set_dynamic_mode)
+            self.eink_mode = new_mode
+            self.logger.info(f"Hotkey: eInk mode → {new_mode}")
+            self._queue_notification({'type': 'mode', 'mode': new_mode})
+        except Exception as e:
+            self.logger.error(f"Hotkey mode error: {e}")
+        return True
+
     # ------------------------------------------------------------------
     # Commands
     # ------------------------------------------------------------------
@@ -585,12 +607,14 @@ class HelperDaemon:
             elif cmd == 'enable-eink':
                 self._eink_op(self.eink.enable_eink)
                 self.eink_enabled = True
+                self.eink_mode = None
                 response['success'] = True
                 response['message'] = 'E-Ink display enabled'
 
             elif cmd == 'disable-eink':
                 self._eink_op(self.eink.disable_eink)
                 self.eink_enabled = False
+                self.eink_mode = None
                 response['success'] = True
                 response['message'] = 'E-Ink display disabled'
 
@@ -601,11 +625,13 @@ class HelperDaemon:
 
             elif cmd == 'set-dynamic':
                 self._eink_op(self.eink.set_dynamic_mode)
+                self.eink_mode = 'dynamic'
                 response['success'] = True
                 response['message'] = 'E-Ink set to Dynamic Mode (fast refresh)'
 
             elif cmd == 'set-reading':
                 self._eink_op(self.eink.set_reading_mode)
+                self.eink_mode = 'reading'
                 response['success'] = True
                 response['message'] = 'E-Ink set to Reading Mode (high-quality refresh)'
 
@@ -695,6 +721,7 @@ class HelperDaemon:
                 response['success'] = True
                 response['eink_enabled'] = self.eink_enabled
                 response['brightness_level'] = self.brightness_level
+                response['eink_mode'] = self.eink_mode
                 response['tcon_available'] = self._tcon_available()
                 response['ec_available'] = bool(self.ec and self.ec.access_available)
                 response['message'] = 'State retrieved'
