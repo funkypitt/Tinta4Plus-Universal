@@ -167,7 +167,7 @@ Images are discovered at startup: any `eink-disable<N>.jpg` (2560×1600) next to
 
 ### Frontlight
 
-Use the frontlight slider or the − / + buttons (0-8) to control the eInk frontlight. The frontlight turns on automatically when switching to eInk and off when switching back to OLED. Setting brightness to **0 fully disables the frontlight** (rather than setting PWM to 0, which can produce a faint glow on some panels). Moving brightness back to any non-zero value re-enables it.
+Use the frontlight slider or the − / + buttons (0-8) to control the eInk frontlight. The frontlight turns on automatically when switching to eInk and off when switching back to OLED. Setting brightness to **0 fully disables the frontlight** (rather than setting PWM to 0, which can produce a faint glow on some panels). Moving brightness back to any non-zero value re-enables it. The level is remembered: the next switch to eInk (also after a restart) starts from the last level you used.
 
 ### Global keyboard shortcuts
 
@@ -181,6 +181,10 @@ These shortcuts work system-wide (via evdev in the helper daemon) whenever the d
 | **Help** (Fn+F9) | Refresh eInk (clear ghosts) | eInk enabled |
 | **Brightness Up** (Fn+F6) | Increase frontlight brightness | eInk enabled |
 | **Brightness Down** (Fn+F5) | Decrease frontlight brightness | eInk enabled |
+
+### eInk colour saturation
+
+The colour eInk panel is pale by nature. The **eInk saturation** slider (Settings tab, X11 sessions) boosts colours on the eInk output only; *off* (the default) leaves them untouched, around 2.5× suits this panel. It takes effect at once while the eInk is active, is re-applied on every switch, and is reset before the privacy image is drawn and before returning to the OLED.
 
 ### Display scaling
 

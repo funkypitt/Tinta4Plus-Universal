@@ -75,6 +75,7 @@ def load_settings(logger):
         'display_scale': DEFAULT_SCALE,
         'brightness': DEFAULT_BRIGHTNESS,
         'privacy_image': 'random',
+        'eink_saturation': 1.0,
     }
     try:
         import json
@@ -82,6 +83,10 @@ def load_settings(logger):
             data = json.load(f)
         defaults['display_scale'] = data.get('display_scale', DEFAULT_SCALE)
         defaults['privacy_image'] = data.get('privacy_image', 'random')
+        try:
+            defaults['eink_saturation'] = float(data.get('eink_saturation', 1.0))
+        except (TypeError, ValueError):
+            pass
         try:
             defaults['brightness'] = max(0, min(8, int(data.get('brightness', DEFAULT_BRIGHTNESS))))
         except (TypeError, ValueError):
@@ -152,6 +157,8 @@ def switch_to_oled(helper, display_mgr, logger, privacy_image='random'):
             time.sleep(0.5)
     except Exception as e:
         logger.warning(f"Could not reset eInk rotation: {e}")
+    # Neutral colours for the privacy image and before the output goes away
+    display_mgr.suspend_eink_color()
     # 1. Switch to dynamic mode for color privacy image
     helper.send_command('set-dynamic')
     time.sleep(0.5)
@@ -266,6 +273,7 @@ def main():
     brightness = settings.get('brightness', DEFAULT_BRIGHTNESS)
 
     display_mgr = DisplayManager(logger)
+    display_mgr.eink_saturation = settings['eink_saturation']
 
     if eink_active:
         logger.info("Currently on eInk — switching to OLED")

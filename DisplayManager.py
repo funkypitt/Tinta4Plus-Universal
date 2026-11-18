@@ -43,12 +43,22 @@ class DisplayManager:
         'inverted': (-1, 0, 1, 0, -1, 1, 0, 0, 1),
     }
 
+    # eInk colour saturation (X11 only): limits of the user setting and the
+    # Rec.709 luma weights the saturation matrix is built from
+    SATURATION_MIN, SATURATION_MAX = 1.0, 3.0
+    LUMA_WEIGHTS = (0.2126, 0.7152, 0.0722)
+
     @staticmethod
     def is_portrait(rotation):
         return rotation in ('left', 'right')
 
     def __init__(self, logger):
         self.logger = logger
+        # Saturation boost for the (washed-out) colour eInk panel; 1.0 = off.
+        # Set by the owner from the settings; see _apply_eink_color_x11().
+        self.eink_saturation = 1.0
+        self._color_suspended = False   # True while switching back to the OLED
+        self._ctm_written = None        # factor last written to the output (None = never)
         self.session_type = self._detect_session_type()
         self.desktop_env = self._detect_desktop_environment()
         self.logger.info(f"DisplayManager: session={self.session_type}, desktop={self.desktop_env}")
@@ -596,6 +606,9 @@ class DisplayManager:
                 rot_info = f", rotation {rotation}" if rotation != 'normal' else ""
                 self.logger.info(f"Enabled display: {display_name}{scale_info}{rot_info}")
                 self._fit_framebuffer_x11(display_name)
+                if display_name == self.EINK_CONNECTOR:
+                    self._color_suspended = False   # the eInk is in use again
+                    self.apply_eink_color(force=True)
                 return True
 
             # Verification failed — reset to baseline and retry once
@@ -614,6 +627,9 @@ class DisplayManager:
                 scale_info = f" with {scale}x scale" if scale and scale != 1.0 else ""
                 self.logger.info(f"Enabled display (after retry): {display_name}{scale_info}")
                 self._fit_framebuffer_x11(display_name)
+                if display_name == self.EINK_CONNECTOR:
+                    self._color_suspended = False   # the eInk is in use again
+                    self.apply_eink_color(force=True)
                 return True
             else:
                 self.logger.error(f"Failed to enable display: {display_name} (display not active after retry)")
@@ -621,6 +637,76 @@ class DisplayManager:
 
         except Exception as e:
             self.logger.error(f"Failed to enable display: {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # eInk colour saturation (X11 RandR "CTM" output property)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def saturation_ctm(cls, factor):
+        """The 3x3 saturation matrix for `factor` as RandR CTM property values.
+
+        Each matrix element is a sign-magnitude S31.32 fixed-point number,
+        passed to xrandr as two 32-bit integers (low word, high word).
+        factor 1.0 gives the identity; 2.5 was a tester's choice for this panel.
+        """
+        values = []
+        for row in range(3):
+            for col in range(3):
+                element = cls.LUMA_WEIGHTS[col] * (1.0 - factor) + (factor if row == col else 0.0)
+                magnitude = int(round(abs(element) * (1 << 32)))
+                low = magnitude & 0xFFFFFFFF
+                high = (magnitude >> 32) & 0x7FFFFFFF
+                if element < 0 and magnitude:
+                    high |= 0x80000000
+                # xrandr parses the values as signed 32-bit integers
+                values.extend(v - (1 << 32) if v >= (1 << 31) else v for v in (low, high))
+        return values
+
+    def supports_eink_color(self):
+        """Saturation needs the RandR CTM property: X11 sessions only."""
+        return self.session_type == 'x11'
+
+    def apply_eink_color(self, force=False):
+        """(Re)apply the configured saturation to the eInk output.
+
+        Called after every eInk enable (a modeset may drop the property) and
+        when the setting changes. Never raises; a failure is only logged —
+        colour is cosmetic and must not break a display switch.
+        """
+        if not self.supports_eink_color() or self._color_suspended:
+            return False
+        factor = max(self.SATURATION_MIN, min(self.SATURATION_MAX, float(self.eink_saturation)))
+        if factor == 1.0 and self._ctm_written in (None, 1.0) and not force:
+            return True   # feature unused: leave the output property alone
+        return self._write_ctm_x11(factor)
+
+    def suspend_eink_color(self):
+        """Back to neutral colours and keep them: called before the privacy
+        image is drawn and the eInk output is given up, so the matrix can
+        neither tint that image nor follow the CRTC to the OLED. The next
+        eInk enable lifts the suspension."""
+        self._color_suspended = True
+        if not self.supports_eink_color():
+            return
+        if self.eink_saturation != 1.0 or self._ctm_written not in (None, 1.0):
+            self._write_ctm_x11(1.0)
+
+    def _write_ctm_x11(self, factor):
+        try:
+            ctm = ','.join(str(v) for v in self.saturation_ctm(factor))
+            result = subprocess.run(['xrandr', '--output', self.EINK_CONNECTOR, '--set', 'CTM', ctm],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                self.logger.warning(f"Could not set eInk saturation {factor:.1f}: {result.stderr.strip()}")
+                return False
+            self._ctm_written = factor
+            self.logger.info(f"eInk saturation set to {factor:.1f}×" if factor != 1.0
+                             else "eInk saturation reset to neutral")
+            return True
+        except Exception as e:
+            self.logger.warning(f"Could not set eInk saturation: {e}")
             return False
 
     def _fit_framebuffer_x11(self, display_name):
@@ -678,6 +764,8 @@ class DisplayManager:
     def _disable_display_x11(self, display_name):
         """Disable a display using xrandr."""
         try:
+            if display_name == self.EINK_CONNECTOR:
+                self.suspend_eink_color()   # never leave a matrix on a CRTC we give up
             subprocess.run(
                 ['xrandr', '--output', display_name, '--off'],
                 capture_output=True,

@@ -159,6 +159,15 @@ These work both in the tkinter GUI (`bind_all`) and globally via `GlobalHotkeyLi
 
 Hotkeys reach the GUI as daemon *notifications* (`{'type': 'toggle' | 'reader' | 'brightness' | 'refresh' | 'mode'}`). The GUI long-polls for them on a **second** socket connection (`wait-notifications`, `_notify_loop`, 20 s per poll), so they arrive at once; the 5 s keepalive still drains the queue as a fallback (older daemon, poll connection down). The long-poll is not counted as a busy command (the watchdog must still fire when the GUI dies) and a waiter whose client has disconnected leaves the queue alone (`_peer_gone`). `HelperClient.close()` does `shutdown()` first — `close()` alone does not wake a thread blocked in `recv()`.
 
+### eInk colour saturation (X11 only)
+
+Setting `eink_saturation` (1.0 = off … 3.0, Settings slider; from a tester's patch that hardcoded 2.5×). `DisplayManager.saturation_ctm(factor)` builds the Rec.709 saturation matrix as the RandR `CTM` output property (9 × sign-magnitude S31.32, passed to `xrandr --set CTM` as 18 signed 32-bit ints, low word first); factor 2.5 reproduces the tester's values exactly. Rules:
+
+- Applied by `_enable_display_x11` after **every** eInk enable (covers switch, reader rotation, layout watchdog, resume check, `toggle-eink.py`), once more at the end of `_enable_eink_sequence`, and live from the slider (only when no switch holds `_display_lock`).
+- `suspend_eink_color()` writes the identity before the privacy image is drawn and in `_disable_display_x11(eInk)`, so the matrix neither tints that image nor follows the CRTC to the OLED; the next eInk enable lifts the suspension.
+- With the setting at 1.0 and nothing written by this process, **no** xrandr CTM call is made at all — users who never touch the slider see no behaviour change.
+- Failures are logged, never raised: colour must not break a display switch. Wayland: unsupported (slider disabled).
+
 ### OLED wake sequence
 
 When switching back to OLED, the app forces DPMS on (`xset dpms force on`; on Wayland deactivates `org.gnome.ScreenSaver` and `loginctl activate`s its own session). It deliberately never calls `loginctl unlock-session`: Super+P is handled by a root evdev listener and therefore fires from the lock screen, so unlocking here would bypass the lock screen.
@@ -217,7 +226,7 @@ The Lector fork lives in its own repository (https://github.com/funkypitt/eink-r
 - GUI uses sv-ttk dark theme
 - GUI log: `~/.cache/Tinta4PlusU/gui.log` (rotating, 1 MB × 3) + console. Helper log: `/var/log/tinta4plusu-helper.log` (0644). Nothing is written to predictable `/tmp` paths except the socket.
 - Socket path: `/tmp/tinta4plusu.sock` (0600, owned by the launching user; peer-cred checked). Daemon lock/pid: `/run/lock/tinta4plusu-helper.lock`, `/run/tinta4plusu-helper.pid`.
-- Config dir: `~/.config/Tinta4PlusU` (`settings` JSON keys: display_scale, refresh_period, autoswitch_theme, flip_countdown, privacy_image, floating_button, text_size, reader_rotation, reader_lid_open_exits, reader_active, reader_backup, indicator, close_to_indicator, reader_open_app, brightness). `brightness` is the last used frontlight level (0 = off): saved on every change (slider, +/−, Fn+F5/F6, D-Bus), used for the next switch to eInk and by `toggle-eink.py`. On connect the daemon's level only wins while the eInk is on
+- Config dir: `~/.config/Tinta4PlusU` (`settings` JSON keys: display_scale, refresh_period, autoswitch_theme, flip_countdown, privacy_image, floating_button, text_size, reader_rotation, reader_lid_open_exits, reader_active, reader_backup, indicator, close_to_indicator, reader_open_app, brightness, eink_saturation). `brightness` is the last used frontlight level (0 = off): saved on every change (slider, +/−, Fn+F5/F6, D-Bus), used for the next switch to eInk and by `toggle-eink.py`. On connect the daemon's level only wins while the eInk is on
 - `HelperClient.disconnect(shutdown_helper=...)`: only the process that launched the daemon passes True.
 - `ECController` serialises every EC transaction with an RLock; `EInkUSBController` access is serialised by the daemon's `_usb_lock`.
 - Commit messages: imperative mood, concise summary line, details in body if needed

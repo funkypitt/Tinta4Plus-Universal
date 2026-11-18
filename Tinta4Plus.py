@@ -410,6 +410,7 @@ class EInkControlGUI:
         'close_to_indicator': True,      # window close hides when the indicator runs
         'reader_open_app': True,         # tablet reader mode launches eink-reader fullscreen
         'brightness': 4,                 # last used frontlight level (0 = off)
+        'eink_saturation': 1.0,          # colour saturation on the eInk (X11; 1.0 = off)
     }
     READER_APP = 'eink-reader'
 
@@ -517,6 +518,9 @@ class EInkControlGUI:
         except (TypeError, ValueError):
             self._brightness_level = self.DEFAULT_SETTINGS['brightness']
         self._saved_brightness = self._brightness_level
+        self.eink_saturation = self._clamp_saturation(settings['eink_saturation'])
+        self.display_mgr.eink_saturation = self.eink_saturation
+        self._saturation_after = None
 
         # Build UI
         self._thumbnail_cache = {}
@@ -525,6 +529,7 @@ class EInkControlGUI:
         # Apply loaded settings to UI controls after they're created
         self._set_scale_ui(self.display_scale)
         self._set_brightness_ui(self._brightness_level)
+        self._set_saturation_ui(self.eink_saturation)
         self.refresh_period_var.set(int(settings['refresh_period']))
         self._update_refresh_period_label()
         self.autoswitch_theme_var.set(bool(settings['autoswitch_theme']))
@@ -640,6 +645,7 @@ class EInkControlGUI:
                 'close_to_indicator': bool(self.close_to_indicator_var.get()),
                 'reader_open_app': bool(self.reader_app_var.get()),
                 'brightness': int(self._brightness_level),
+                'eink_saturation': float(self.eink_saturation),
             }
             tmp = self.SETTINGS_FILE + '.tmp'
             with open(tmp, 'w') as f:
@@ -1004,6 +1010,29 @@ class EInkControlGUI:
         Tooltip(self.scale_slider, "UI scale on the eInk panel (1.00–2.00). Applied on the next switch to eInk.")
         row += 1
         ttk.Label(tab, text="Applied the next time you switch to eInk.", style='Small.TLabel').grid(
+            row=row, column=1, sticky='w', pady=(2, 10))
+        row += 1
+
+        # eInk colour saturation (X11 RandR colour matrix)
+        ttk.Label(tab, text="eInk saturation").grid(row=row, column=0, sticky='w', padx=(0, 12))
+        sat_row = ttk.Frame(tab)
+        sat_row.grid(row=row, column=1, sticky='ew')
+        sat_row.columnconfigure(0, weight=1)
+        self.saturation_var = tk.DoubleVar(value=1.0)
+        self.saturation_slider = ttk.Scale(sat_row, from_=DisplayManager.SATURATION_MIN,
+                                           to=DisplayManager.SATURATION_MAX, orient='horizontal',
+                                           variable=self.saturation_var, command=self.on_saturation_changed)
+        self.saturation_slider.grid(row=0, column=0, sticky='ew')
+        self.saturation_label = ttk.Label(sat_row, text="off", width=7, anchor='e')
+        self.saturation_label.grid(row=0, column=1, padx=(8, 0))
+        Tooltip(self.saturation_slider, "Boosts colours on the eInk panel, which are pale by nature.\n"
+                                        "Off leaves colours untouched; around 2.5× suits this panel.")
+        row += 1
+        sat_ok = self.display_mgr.supports_eink_color()
+        if not sat_ok:
+            self.saturation_slider.config(state='disabled')
+        ttk.Label(tab, text="Applied at once while the eInk is active; the OLED is never affected."
+                  if sat_ok else "Needs an X11 session.", style='Small.TLabel').grid(
             row=row, column=1, sticky='w', pady=(2, 10))
         row += 1
 
@@ -2027,6 +2056,13 @@ class EInkControlGUI:
                                       rotation=rotation):
             self._set_layout_target(self.DISPLAY_EINK, rotation)
             self.log_message("✓ E-Ink display enabled")
+            # Last, once the layout is final: an earlier reconfiguration could
+            # have dropped the colour matrix (skipped when saturation is off).
+            if self.eink_saturation != 1.0 and self.display_mgr.supports_eink_color():
+                if self.display_mgr.apply_eink_color(force=True):
+                    self.log_message(f"✓ eInk saturation {self.eink_saturation:.1f}× applied")
+                else:
+                    self.log_message("⚠ Could not apply the eInk saturation", level='warning')
         else:
             self._adopt_layout_from_reality()
             self.log_message("⚠ E-Ink powered, but the output layout could not be verified", level='warning')
@@ -2045,6 +2081,10 @@ class EInkControlGUI:
 
         self._ui(self._stop_refresh_timer)
         self._ui(self._ensure_floating_button, False)
+
+        # Neutral colours again before the privacy image is drawn (it would be
+        # oversaturated) and before the eInk output is given up.
+        self.display_mgr.suspend_eink_color()
 
         # Step 1: Dynamic mode renders the colour privacy image properly
         self._set_busy_hint("Showing the privacy image…")
@@ -2690,6 +2730,49 @@ class EInkControlGUI:
         self._set_scale_ui(scale)
         self.log_message(f"Display scale set to {scale:.2f}× (applies on next switch to eInk)")
         self.save_settings()
+
+    @staticmethod
+    def _clamp_saturation(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return 1.0
+        if value != value:   # NaN
+            return 1.0
+        return max(DisplayManager.SATURATION_MIN, min(DisplayManager.SATURATION_MAX, round(value, 1)))
+
+    def _set_saturation_ui(self, factor):
+        self.saturation_var.set(factor)
+        self.saturation_label.config(text="off" if factor == 1.0 else f"{factor:.1f}×")
+
+    def on_saturation_changed(self, value):
+        """Handle the eInk saturation slider (snaps to 0.1)."""
+        factor = self._clamp_saturation(value)
+        if factor == self.eink_saturation:
+            self._set_saturation_ui(factor)
+            return
+        self.eink_saturation = factor
+        self.display_mgr.eink_saturation = factor
+        self._set_saturation_ui(factor)
+        # Debounce: one xrandr call and one settings write per drag
+        if self._saturation_after is not None:
+            self.root.after_cancel(self._saturation_after)
+        self._saturation_after = self.root.after(400, self._commit_saturation)
+
+    def _commit_saturation(self):
+        self._saturation_after = None
+        factor = self.eink_saturation
+        self.log_message("eInk saturation off" if factor == 1.0 else f"eInk saturation set to {factor:.1f}×")
+        self.save_settings()
+        if self.ui_preview or not self._eink_on or self._switching:
+            return   # applied by the next switch to eInk
+        # Never while a switch or the watchdog is reconfiguring the outputs
+        if self._display_lock.acquire(blocking=False):
+            try:
+                if not self.display_mgr.apply_eink_color(force=True):
+                    self.log_message("⚠ Could not apply the eInk saturation", level='warning')
+            finally:
+                self._display_lock.release()
 
     def on_countdown_changed(self):
         try:
