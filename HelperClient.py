@@ -20,8 +20,11 @@ MAX_MESSAGE_BYTES = 64 * 1024
 class HelperClient:
     """Client for communicating with privileged helper daemon via Unix socket"""
 
-    def __init__(self, logger):
+    def __init__(self, logger, quiet=False):
         self.logger = logger
+        # quiet: transport errors are expected (a long-poll connection that
+        # gets closed from another thread) and logged at debug level only
+        self.quiet = quiet
         self.socket = None
         self.connected = False
         self.lock = threading.Lock()
@@ -50,7 +53,8 @@ class HelperClient:
 
             self.socket = sock
             self.connected = True
-            self.logger.info(f"Connected to helper daemon at {socket_path}")
+            (self.logger.debug if self.quiet else self.logger.info)(
+                f"Connected to helper daemon at {socket_path}")
             return True
         except Exception as e:
             (self.logger.debug if quiet else self.logger.error)(f"Failed to connect to helper: {e}")
@@ -99,6 +103,12 @@ class HelperClient:
         self.connected = False
         if sock is not None:
             try:
+                # Wakes a thread blocked in recv() on this socket (close()
+                # alone does not), e.g. a 'wait-notifications' long-poll.
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
                 sock.close()
             except OSError:
                 pass
@@ -146,7 +156,7 @@ class HelperClient:
                 return response
 
             except Exception as e:
-                self.logger.error(f"Command error: {e}")
+                (self.logger.debug if self.quiet else self.logger.error)(f"Command error: {e}")
                 self.connected = False
                 raise
 

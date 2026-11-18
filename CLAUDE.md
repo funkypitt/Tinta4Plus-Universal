@@ -156,6 +156,8 @@ Testable without the hardware: Xvfb (`-dpi 192`, `Xft.dpi` via xrdb) + a window 
 
 These work both in the tkinter GUI (`bind_all`) and globally via `GlobalHotkeyListener` (evdev, runs in the helper daemon as root). The listener holds Super back until it knows whether P follows; any other key (or a Super auto-repeat) first injects the pending Super-down so Super+L / Super+Tab / Super+drag reach the desktop intact. Brightness/Help keys are only swallowed when the daemon callback returns True (eInk on); otherwise they pass through to the desktop. Callbacks' hardware work runs on a worker thread (`run_async`) so key forwarding never stalls. Its own `tinta4plusu-fwd-*` UInput mirrors are skipped when scanning devices.
 
+Hotkeys reach the GUI as daemon *notifications* (`{'type': 'toggle' | 'reader' | 'brightness' | 'refresh'}`). The GUI long-polls for them on a **second** socket connection (`wait-notifications`, `_notify_loop`, 20 s per poll), so they arrive at once; the 5 s keepalive still drains the queue as a fallback (older daemon, poll connection down). The long-poll is not counted as a busy command (the watchdog must still fire when the GUI dies) and a waiter whose client has disconnected leaves the queue alone (`_peer_gone`). `HelperClient.close()` does `shutdown()` first — `close()` alone does not wake a thread blocked in `recv()`.
+
 ### OLED wake sequence
 
 When switching back to OLED, the app forces DPMS on (`xset dpms force on`; on Wayland deactivates `org.gnome.ScreenSaver` and `loginctl activate`s its own session). It deliberately never calls `loginctl unlock-session`: Super+P is handled by a root evdev listener and therefore fires from the lock screen, so unlocking here would bypass the lock screen.

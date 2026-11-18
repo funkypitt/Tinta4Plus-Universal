@@ -34,6 +34,7 @@ import sys
 import json
 import time
 import fcntl
+import select
 import socket
 import struct
 import signal
@@ -59,7 +60,8 @@ LOG_LEVEL = logging.INFO
 
 MAX_MESSAGE_BYTES = 64 * 1024   # a command is a few hundred bytes of JSON
 CLIENT_IDLE_TIMEOUT = 90.0      # seconds; the GUI sends a keepalive every 5 s
-MAX_CLIENTS = 8                 # GUI + toggle-eink + a few spares
+MAX_CLIENTS = 8                 # GUI (commands + notifications) + toggle-eink + spares
+NOTIFY_WAIT_MAX = 30.0          # seconds; longest 'wait-notifications' long-poll
 
 BRIGHTNESS_MIN, BRIGHTNESS_MAX = 0, 8
 
@@ -135,7 +137,7 @@ class HelperDaemon:
         self.eink_enabled = False
         self.brightness_level = 4  # default
         self._pending_notifications = []
-        self._notify_lock = threading.Lock()
+        self._notify_cond = threading.Condition()
         # Serializes T-CON USB transfers across socket, hotkey and HTTP threads
         self._usb_lock = threading.Lock()
         self._http_last_refresh = 0.0
@@ -397,16 +399,50 @@ class HelperDaemon:
     # ------------------------------------------------------------------
 
     def _queue_notification(self, notif):
-        """Queue a notification for the GUI to pick up on next keepalive."""
-        with self._notify_lock:
+        """Queue a notification for the GUI.
+
+        A GUI long-polling with 'wait-notifications' gets it at once; an
+        older one picks it up on its next keepalive.
+        """
+        with self._notify_cond:
             self._pending_notifications.append(notif)
+            self._notify_cond.notify_all()
 
     def _drain_notifications(self):
         """Return and clear all pending notifications."""
-        with self._notify_lock:
+        with self._notify_cond:
             notifs = self._pending_notifications[:]
             self._pending_notifications.clear()
         return notifs
+
+    def _wait_notifications(self, timeout, client_socket=None):
+        """Block until a notification is pending (or timeout / shutdown), then drain.
+
+        A waiter whose client has gone away in the meantime (GUI restarted,
+        reconnected) leaves the queue alone, so the notification reaches the
+        client that is still listening instead of being lost with it.
+        """
+        with self._notify_cond:
+            self._notify_cond.wait_for(
+                lambda: self._pending_notifications or not self.running, timeout=timeout)
+            if client_socket is not None and self._peer_gone(client_socket):
+                return []
+            notifs = self._pending_notifications[:]
+            self._pending_notifications.clear()
+        return notifs
+
+    @staticmethod
+    def _peer_gone(sock):
+        """True if the client closed its end (it sends nothing while it waits)."""
+        try:
+            readable, _, _ = select.select([sock], [], [], 0)
+            if not readable:
+                return False
+            return sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b''
+        except (BlockingIOError, InterruptedError):
+            return False
+        except (OSError, ValueError):
+            return True
 
     def _frontlight_hotkeys_active(self):
         return self.eink_enabled and self.ec is not None and self.ec.access_available
@@ -494,8 +530,12 @@ class HelperDaemon:
             raise ValueError(f"Brightness level must be {BRIGHTNESS_MIN}-{BRIGHTNESS_MAX}")
         return level
 
-    def handle_command(self, command_data):
+    def handle_command(self, command_data, client_socket=None):
         """Process a command and return response (watchdog held off meanwhile)"""
+        if isinstance(command_data, dict) and command_data.get('command') == 'wait-notifications':
+            # A long-poll is idle time, not work: it must not count as a busy
+            # command, or a waiting GUI would hold the watchdog off for good.
+            return self._handle_wait_notifications(command_data, client_socket)
         with self._busy_lock:
             self._busy_commands += 1
         try:
@@ -504,6 +544,18 @@ class HelperDaemon:
             with self._busy_lock:
                 self._busy_commands -= 1
             self.watchdog.reset()  # the end of a long command counts as life too
+
+    def _handle_wait_notifications(self, command_data, client_socket=None):
+        try:
+            params = command_data.get('params') or {}
+            timeout = float(params.get('timeout', NOTIFY_WAIT_MAX)) if isinstance(params, dict) else NOTIFY_WAIT_MAX
+            timeout = max(0.0, min(NOTIFY_WAIT_MAX, timeout))
+        except (TypeError, ValueError):
+            timeout = NOTIFY_WAIT_MAX
+        self.watchdog.reset()
+        notifs = self._wait_notifications(timeout, client_socket)
+        self.watchdog.reset()
+        return {'success': True, 'error': None, 'notifications': notifs}
 
     def _handle_command(self, command_data):
         try:
@@ -731,7 +783,7 @@ class HelperDaemon:
                 except (UnicodeDecodeError, json.JSONDecodeError) as e:
                     response = {'success': False, 'error': f'Malformed command: {e}'}
                 else:
-                    response = self.handle_command(command_data)
+                    response = self.handle_command(command_data, client_socket)
 
                 # Send response
                 response_json = json.dumps(response).encode('utf-8')
@@ -835,6 +887,8 @@ class HelperDaemon:
 
         self.logger.info("Shutting down...")
         self.running = False
+        with self._notify_cond:
+            self._notify_cond.notify_all()   # release long-polling clients
 
         # Cancel watchdog
         self.watchdog.cancel()

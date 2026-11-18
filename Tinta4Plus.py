@@ -345,6 +345,7 @@ class EInkControlGUI:
     # Configuration
     SOCKET_PATH = '/tmp/tinta4plusu.sock'
     KEEPALIVE_INTERVAL = 5.0  # seconds (send keepalive every 5s, watchdog is 60s)
+    NOTIFY_WAIT = 20.0        # seconds; one long-poll for hotkey notifications
     SOCKET_TIMEOUT = 10.0  # seconds
     CONFIG_DIR = os.path.expanduser("~/.config/Tinta4PlusU")
     SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings")
@@ -442,6 +443,9 @@ class EInkControlGUI:
         self.helper = HelperClient(logger)
         self._keepalive_thread = None
         self._keepalive_stop = threading.Event()
+        # Second connection, used only to long-poll for hotkey notifications
+        self.notify_client = None
+        self._notify_thread = None
         self.helper_process = None
         self._connection_state = 'disconnected'
 
@@ -1563,22 +1567,65 @@ class EInkControlGUI:
         even while the main loop is busy, and across suspend/resume.
         """
         self.stop_keepalive()
-        self._keepalive_stop.clear()
         self._keepalive_thread = threading.Thread(target=self._keepalive_loop, daemon=True, name='keepalive')
         self._keepalive_thread.start()
         self.logger.info(f"Started keepalive thread ({self.KEEPALIVE_INTERVAL}s interval)")
+        self.notify_client = HelperClient(self.logger, quiet=True)
+        self._notify_thread = threading.Thread(target=self._notify_loop,
+                                               args=(self._keepalive_stop, self.notify_client),
+                                               daemon=True, name='notify')
+        self._notify_thread.start()
 
     def stop_keepalive(self):
         """Stop the keepalive thread."""
         self._keepalive_stop.set()
-        thread = self._keepalive_thread
-        if thread and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=3)
+        if self.notify_client is not None:
+            self.notify_client.close()   # wakes the long-poll
+        for thread in (self._keepalive_thread, self._notify_thread):
+            if thread and thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=3)
         self._keepalive_thread = None
+        self._notify_thread = None
+        # A fresh event per generation: a thread that outlived the join keeps
+        # seeing its own (set) event and can never run alongside a new one.
+        self._keepalive_stop = threading.Event()
+
+    def _notify_loop(self, stop, client):
+        """Long-poll the daemon so hotkey notifications arrive at once.
+
+        Runs on its own connection: a command on the main one must never
+        wait behind the poll. The keepalive still collects notifications,
+        which covers an older daemon and any time this connection is down.
+        """
+        while not stop.is_set():
+            try:
+                if not client.is_connected():
+                    if not self.helper.is_connected():
+                        return
+                    if not client.connect(self.SOCKET_PATH, timeout=self.NOTIFY_WAIT + 10.0, quiet=True):
+                        stop.wait(2.0)
+                        continue
+                response = client.send_command('wait-notifications', timeout=self.NOTIFY_WAIT)
+                if not response or not response.get('success'):
+                    self.logger.info("Helper has no 'wait-notifications' (older daemon): "
+                                     "hotkeys are picked up by the keepalive")
+                    client.close()
+                    return
+                notifs = response.get('notifications') or []
+                if notifs and not stop.is_set():
+                    self._ui(self._process_notifications, notifs)
+            except Exception as e:
+                client.close()
+                if stop.is_set():
+                    return
+                self.logger.debug(f"Notification poll error: {e}")
+                stop.wait(2.0)
+        client.close()
 
     def _keepalive_loop(self):
         """Background thread that sends keepalives at regular intervals."""
-        while not self._keepalive_stop.wait(self.KEEPALIVE_INTERVAL):
+        stop = self._keepalive_stop
+        while not stop.wait(self.KEEPALIVE_INTERVAL):
             if not self.helper.is_connected():
                 self._ui(self._on_keepalive_lost, "Helper disconnected")
                 return
