@@ -408,6 +408,7 @@ class EInkControlGUI:
         'indicator': True,               # start the top-bar indicator with the GUI
         'close_to_indicator': True,      # window close hides when the indicator runs
         'reader_open_app': True,         # tablet reader mode launches eink-reader fullscreen
+        'brightness': 4,                 # last used frontlight level (0 = off)
     }
     READER_APP = 'eink-reader'
 
@@ -420,7 +421,7 @@ class EInkControlGUI:
         self._window_visible = not start_hidden
         self._indicator_process = None
         self._dbus_service = None
-        self._brightness_level = 4
+        self._brightness_level = self.DEFAULT_SETTINGS['brightness']
         self._main_thread = threading.current_thread()
         self._ui_queue = queue.Queue()
         self._destroyed = False
@@ -507,6 +508,11 @@ class EInkControlGUI:
         self._indicator_enabled = bool(settings['indicator'])
         self._close_to_indicator = bool(settings['close_to_indicator'])
         self._reader_open_app = bool(settings['reader_open_app'])
+        try:
+            self._brightness_level = max(0, min(self.BRIGHTNESS_MAX, int(settings['brightness'])))
+        except (TypeError, ValueError):
+            self._brightness_level = self.DEFAULT_SETTINGS['brightness']
+        self._saved_brightness = self._brightness_level
 
         # Build UI
         self._thumbnail_cache = {}
@@ -514,6 +520,7 @@ class EInkControlGUI:
 
         # Apply loaded settings to UI controls after they're created
         self._set_scale_ui(self.display_scale)
+        self._set_brightness_ui(self._brightness_level)
         self.refresh_period_var.set(int(settings['refresh_period']))
         self._update_refresh_period_label()
         self.autoswitch_theme_var.set(bool(settings['autoswitch_theme']))
@@ -628,6 +635,7 @@ class EInkControlGUI:
                 'indicator': bool(self.indicator_var.get()),
                 'close_to_indicator': bool(self.close_to_indicator_var.get()),
                 'reader_open_app': bool(self.reader_app_var.get()),
+                'brightness': int(self._brightness_level),
             }
             tmp = self.SETTINGS_FILE + '.tmp'
             with open(tmp, 'w') as f:
@@ -868,7 +876,8 @@ class EInkControlGUI:
         self.btn_bright_up.grid(row=0, column=2)
         self.brightness_label = ttk.Label(light_row, text="4 / 8", width=6, anchor='e')
         self.brightness_label.grid(row=0, column=3, padx=(8, 0))
-        Tooltip(self.brightness_scale, "0 switches the frontlight off. Also: Fn+F5 / Fn+F6 while eInk is active.")
+        Tooltip(self.brightness_scale, "0 switches the frontlight off. Also: Fn+F5 / Fn+F6 while eInk is active.\n"
+                                       "The level is remembered for the next time.")
 
         self.frontlight_note = ttk.Label(self.eink_card, text="", style='Small.TLabel', wraplength=520, justify='left')
         self.frontlight_note.grid(row=3, column=0, columnspan=3, sticky='w', pady=(6, 0))
@@ -1523,9 +1532,13 @@ class EInkControlGUI:
             self.save_settings()
         self._reader_was_active = False
 
+        # While the eInk is on the daemon knows the live frontlight level
+        # (hotkeys may have changed it). Otherwise keep the level remembered
+        # in the settings: it is what the next switch to eInk will use.
         level = response.get('brightness_level')
-        if level is not None:
+        if eink_on and level is not None:
             self._set_brightness_ui(int(level))
+            self._remember_brightness()
 
         if self._tcon_available is False:
             self.log_message("⚠ eInk T-CON (USB) not detected by the helper — eInk switching will fail "
@@ -1604,6 +1617,7 @@ class EInkControlGUI:
                 level = notif.get('level')
                 if level is not None:
                     self._set_brightness_ui(int(level))
+                    self._remember_brightness()
                     self.log_message(f"Hotkey: brightness set to {level}")
             elif ntype == 'refresh':
                 self.log_message("Hotkey: eInk refresh performed")
@@ -1671,7 +1685,6 @@ class EInkControlGUI:
             self._ec_available = True
             self._set_frontlight_note("")
             self.log_message("EC access verified — frontlight controls enabled")
-            self.sync_frontlight_state()
         self._apply_display_state()
 
     def _set_frontlight_note(self, text):
@@ -1681,19 +1694,6 @@ class EInkControlGUI:
         else:
             self.frontlight_note.config(text="")
             self.frontlight_note.grid_remove()
-
-    def sync_frontlight_state(self):
-        """Query EC and update GUI to match actual frontlight brightness"""
-        try:
-            response = self.helper.send_command('get-frontlight-state')
-            if response and response.get('success'):
-                brightness = response.get('brightness_level')
-                if brightness is not None:
-                    self._set_brightness_ui(int(brightness))
-                    self.log_message(f"Synced brightness level: {brightness}")
-        except Exception as e:
-            self.logger.warning(f"Failed to sync frontlight state: {e}")
-            self.log_message("Warning: Could not sync frontlight state from EC", level='error')
 
     def execute_helper_command(self, command, **params):
         """Execute a command via helper; returns the response dict or None (any thread)."""
@@ -2555,6 +2555,13 @@ class EInkControlGUI:
             return  # the slider is only live in eInk mode
         if self.execute_helper_command('set-brightness', level=level):
             self.update_status(f"Frontlight brightness {level}" if level else "Frontlight off")
+            self._remember_brightness()
+
+    def _remember_brightness(self):
+        """Persist the frontlight level so the next start / switch reuses it."""
+        if self._brightness_level != self._saved_brightness:
+            self._saved_brightness = self._brightness_level
+            self.save_settings()
 
     def _on_brightness_key_up(self, _event):
         """XF86MonBrightnessUp — step frontlight up when in eInk mode"""

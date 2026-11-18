@@ -82,7 +82,10 @@ def load_settings(logger):
             data = json.load(f)
         defaults['display_scale'] = data.get('display_scale', DEFAULT_SCALE)
         defaults['privacy_image'] = data.get('privacy_image', 'random')
-        # Brightness isn't persisted in settings — use default
+        try:
+            defaults['brightness'] = max(0, min(8, int(data.get('brightness', DEFAULT_BRIGHTNESS))))
+        except (TypeError, ValueError):
+            pass
     except Exception:
         pass
     return defaults

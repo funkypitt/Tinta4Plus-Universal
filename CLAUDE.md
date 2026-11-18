@@ -214,7 +214,7 @@ The Lector fork lives in its own repository (https://github.com/funkypitt/eink-r
 - GUI uses sv-ttk dark theme
 - GUI log: `~/.cache/Tinta4PlusU/gui.log` (rotating, 1 MB × 3) + console. Helper log: `/var/log/tinta4plusu-helper.log` (0644). Nothing is written to predictable `/tmp` paths except the socket.
 - Socket path: `/tmp/tinta4plusu.sock` (0600, owned by the launching user; peer-cred checked). Daemon lock/pid: `/run/lock/tinta4plusu-helper.lock`, `/run/tinta4plusu-helper.pid`.
-- Config dir: `~/.config/Tinta4PlusU` (`settings` JSON keys: display_scale, refresh_period, autoswitch_theme, flip_countdown, privacy_image, floating_button, text_size, reader_rotation, reader_lid_open_exits, reader_active, reader_backup, indicator, close_to_indicator, reader_open_app)
+- Config dir: `~/.config/Tinta4PlusU` (`settings` JSON keys: display_scale, refresh_period, autoswitch_theme, flip_countdown, privacy_image, floating_button, text_size, reader_rotation, reader_lid_open_exits, reader_active, reader_backup, indicator, close_to_indicator, reader_open_app, brightness). `brightness` is the last used frontlight level (0 = off): saved on every change (slider, +/−, Fn+F5/F6, D-Bus), used for the next switch to eInk and by `toggle-eink.py`. On connect the daemon's level only wins while the eInk is on
 - `HelperClient.disconnect(shutdown_helper=...)`: only the process that launched the daemon passes True.
 - `ECController` serialises every EC transaction with an RLock; `EInkUSBController` access is serialised by the daemon's `_usb_lock`.
 - Commit messages: imperative mood, concise summary line, details in body if needed

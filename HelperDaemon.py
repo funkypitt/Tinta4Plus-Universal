@@ -592,12 +592,19 @@ class HelperDaemon:
                 brightness_level = params.get('brightness_level')
                 if brightness_level is not None:
                     brightness_level = self._parse_level(brightness_level)
-                success, readback = self.ec.enable_frontlight(brightness_level=brightness_level)
+                if brightness_level == 0:
+                    # A remembered level of 0 means "off": powering the
+                    # frontlight at PWM 0 can still glow.
+                    success, readback = self.ec.disable_frontlight()
+                    message = 'Frontlight left off (brightness 0)' if success else 'Frontlight disable failed'
+                else:
+                    success, readback = self.ec.enable_frontlight(brightness_level=brightness_level)
+                    message = 'Frontlight enabled' if success else 'Frontlight enable failed (readback mismatch)'
                 if success and brightness_level is not None:
                     self.brightness_level = brightness_level
                 response['success'] = success
                 response['readback'] = f"0x{readback:02x}"
-                response['message'] = 'Frontlight enabled' if success else 'Frontlight enable failed (readback mismatch)'
+                response['message'] = message
 
             elif cmd == 'disable-frontlight':
                 self._require_ec()
